@@ -240,6 +240,16 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
         Err(e) => println!("could not put the cli on PATH: {e}"),
     }
 
+    // Leave the daemon on this build. An upgrade does not restart herdr, so
+    // without this the previous binary keeps the job until it does — and this
+    // has to happen whether or not the config itself needed changing, which is
+    // the common case on an upgrade.
+    match crate::engine::daemon::ensure_running(&Paths::resolve()?) {
+        Ok(true) => println!("timer daemon started"),
+        Ok(false) => println!("timer daemon will hand over on its next tick"),
+        Err(e) => println!("could not check the timer daemon: {e}"),
+    }
+
     let out = crate::integrate::apply(&body)?;
     if out == body {
         println!("config already wired up");
@@ -253,14 +263,6 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
     println!("  prefix+b        open the board");
     println!("  prefix+shift+b  queue a prompt");
     println!("  prefix+alt+b    re-import board cards");
-
-    // Leave the daemon on this build too. An upgrade does not restart herdr, so
-    // without this the previous binary keeps the job until it does.
-    match crate::engine::daemon::ensure_running(&Paths::resolve()?) {
-        Ok(true) => println!("  timer daemon started"),
-        Ok(false) => println!("  timer daemon will hand over on its next tick"),
-        Err(e) => println!("  could not check the timer daemon: {e}"),
-    }
     reload_herdr();
     Ok(())
 }

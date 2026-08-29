@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3
+
+- `configure --apply` claims the daemon before checking the config, not after.
+  On an upgrade the config is usually already correct, and the early return was
+  skipping the daemon handover — the exact case 0.5.2 was for.
+
 ## 0.5.2
 
 - `configure --apply` now also makes sure the timer daemon is this build, so one

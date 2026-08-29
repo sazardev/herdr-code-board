@@ -252,10 +252,16 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
+    /// Every card, in board order.
+    ///
+    /// The `id` tiebreak matters: ULIDs make it creation order, and without it
+    /// two cards made in the same second come back in whatever order SQLite
+    /// feels like — which showed up as a dispatch order that differed between
+    /// machines.
     pub fn list_cards(&self) -> Result<Vec<Card>> {
         let mut stmt = self
             .conn()
-            .prepare(&format!("{SELECT} ORDER BY priority DESC, created_at"))?;
+            .prepare(&format!("{SELECT} ORDER BY priority DESC, created_at, id"))?;
         let rows = stmt
             .query_map([], row_to_card)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -264,7 +270,7 @@ impl Store {
 
     pub fn cards_in(&self, column: Column) -> Result<Vec<Card>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{SELECT} WHERE lane = ?1 ORDER BY priority DESC, created_at"
+            "{SELECT} WHERE lane = ?1 ORDER BY priority DESC, created_at, id"
         ))?;
         let rows = stmt
             .query_map([column.as_str()], row_to_card)?
@@ -275,7 +281,7 @@ impl Store {
     /// Cards currently holding a herdr pane, used for concurrency accounting.
     pub fn live_cards(&self) -> Result<Vec<Card>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{SELECT} WHERE lane IN ('running','waiting','blocked') ORDER BY status_since"
+            "{SELECT} WHERE lane IN ('running','waiting','blocked') ORDER BY status_since, id"
         ))?;
         let rows = stmt
             .query_map([], row_to_card)?

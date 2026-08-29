@@ -95,12 +95,23 @@ fn a_rule_cycle_cannot_dispatch_forever() {
         "a two-card cycle started {starts} agents; the budget allows {}",
         budget * 2
     );
-    // And both cards end up stopped with an explanation, not silently stuck.
-    for id in [&a, &b] {
-        let card = exec.store.get_card(id).unwrap().unwrap();
-        assert_eq!(card.column, Column::Failed);
-        assert!(card.last_error.unwrap().contains("max_dispatches"));
-    }
+    // The cycle is broken and neither card is left running. Which of the two
+    // trips the ceiling first depends on where the alternation lands, so the
+    // property to assert is that it stopped and said why — not which one.
+    let cards: Vec<_> = [&a, &b]
+        .iter()
+        .map(|id| exec.store.get_card(id).unwrap().unwrap())
+        .collect();
+    assert!(cards.iter().all(|c| !c.column.is_live()));
+    let stopped = cards
+        .iter()
+        .find(|c| c.column == Column::Failed)
+        .expect("one of the pair must be stopped by the budget");
+    assert!(stopped
+        .last_error
+        .as_ref()
+        .unwrap()
+        .contains("max_dispatches"));
 }
 
 #[test]

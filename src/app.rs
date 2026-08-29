@@ -162,6 +162,13 @@ fn event(paths: &Paths, config: &Config) -> Result<()> {
     // One publish per invocation: herdr fires this hook twice per agent turn,
     // and a metadata write can repaint the pane the user is watching.
     exec.present()?;
+    drop(exec);
+    drop(_lock);
+
+    // Self-heal. An upgrade that changes the schema can leave the previous
+    // daemon unable to run and nothing in its place, and timed rules then stop
+    // firing silently. This is cheap when one is already up: a single try-lock.
+    let _ = daemon::ensure_running(paths);
     Ok(())
 }
 

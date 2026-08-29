@@ -84,28 +84,32 @@ pub fn run(paths: &Paths, config: &Config) -> Result<()> {
 
     let herdr: Arc<dyn HerdrApi> = Arc::new(CliHerdr::new());
     loop {
+        // Read the declaration first, and without migrating. An upgrade that
+        // bumps the schema leaves this daemon unable to open the board at all —
+        // and the whole point is that it should be standing down anyway.
+        let wanted = crate::store::peek_kv(&paths.database(), WANTED_EXE);
+        if let Some(wanted) = wanted.filter(|w| !w.is_empty() && *w != me) {
+            eprintln!("herdr-code-board: handing the daemon over to {wanted}");
+            drop(_singleton);
+            let _ = spawn_detached(paths, std::path::Path::new(&wanted));
+            return Ok(());
+        }
+
         if let Err(e) = sweep_once(paths, config, herdr.clone()) {
             eprintln!("herdr-code-board: sweep failed: {e:#}");
         }
 
-        let (next, wanted) = {
-            let store = Store::open(&paths.database())?;
-            let wanted = store.kv_get(WANTED_EXE)?;
-            let exec = Executor::new(store, herdr.clone(), config.clone());
-            (exec.next_deadline().unwrap_or(None), wanted)
-        };
-
-        // A newer build asked for the job. Release the lock and hand it over,
-        // rather than keeping the old logic alive until herdr restarts.
-        if let Some(wanted) = wanted {
-            if !wanted.is_empty() && wanted != me {
-                eprintln!("herdr-code-board: handing the daemon over to {wanted}");
-                drop(_singleton);
-                let _ = spawn_detached(paths, std::path::Path::new(&wanted));
-                return Ok(());
+        let next = match Store::open(&paths.database()) {
+            Ok(store) => Executor::new(store, herdr.clone(), config.clone())
+                .next_deadline()
+                .unwrap_or(None),
+            // Cannot read the board — a newer schema, most likely. Do not exit:
+            // the next pass reads the declaration and hands over properly.
+            Err(e) => {
+                eprintln!("herdr-code-board: cannot open the board: {e:#}");
+                None
             }
-        }
-
+        };
         std::thread::sleep(sleep_for(next, now(), config.engine_tick_seconds));
     }
 }
@@ -231,6 +235,44 @@ mod handover_tests {
                 .unwrap()
                 .as_deref(),
             Some(our_exe().as_str())
+        );
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// A schema bump is the normal shape of an upgrade. The previous build's
+    /// daemon cannot open the board any more, so it must learn it has been
+    /// superseded without opening it — otherwise it dies and nothing replaces
+    /// it, and timed rules stop firing with no sign of why.
+    #[test]
+    fn the_handover_declaration_is_readable_without_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::config::Paths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().to_path_buf(),
+            from_herdr: true,
+        };
+        Store::open(&paths.database())
+            .unwrap()
+            .kv_set(WANTED_EXE, "/new/build/herdr-code-board")
+            .unwrap();
+
+        // Pretend the file is from a future version this build refuses to touch.
+        let conn = rusqlite::Connection::open(paths.database()).unwrap();
+        conn.pragma_update(None, "user_version", 999i64).unwrap();
+        drop(conn);
+
+        assert!(
+            Store::open(&paths.database()).is_err(),
+            "the schema guard should refuse a newer database"
+        );
+        assert_eq!(
+            crate::store::peek_kv(&paths.database(), WANTED_EXE).as_deref(),
+            Some("/new/build/herdr-code-board"),
+            "but the handover note is still legible"
         );
     }
 }

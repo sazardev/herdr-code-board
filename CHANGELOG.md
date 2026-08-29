@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1
+
+- **A schema-changing upgrade left the board with no timer daemon.** The 0.6.0
+  install migrated the database to v2; the previous build's daemon then could
+  not open it, refused (correctly) and exited — and nothing started a
+  replacement, so timed rules stopped firing with no sign of why. Found by
+  watching `ps` after the 0.6.0 upgrade.
+
+  The daemon now reads the handover note before touching the board, and without
+  migrating, so it can stand down for a newer build it cannot read. It also no
+  longer exits when the board is unreadable. And the event hook makes sure a
+  daemon exists, which costs one try-lock when one already does.
+
 ## 0.6.0
 
 **Cards run in the session that queued them.**

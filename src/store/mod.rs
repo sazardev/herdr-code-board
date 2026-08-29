@@ -125,6 +125,22 @@ impl Store {
     }
 }
 
+/// Read one kv value without opening the board properly.
+///
+/// A daemon from an older build cannot run migrations — the schema is already
+/// newer than it understands — but it still needs to learn that it has been
+/// superseded. This reads the one key that tells it so, and returns `None` for
+/// any problem at all, because there is nothing useful to do about one here.
+pub fn peek_kv(path: &Path, key: &str) -> Option<String> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    conn.query_row("SELECT v FROM kv WHERE k = ?1", [key], |r| r.get(0))
+        .ok()
+}
+
 /// Unix seconds. One helper so every timestamp in the database agrees.
 pub fn now() -> i64 {
     std::time::SystemTime::now()
@@ -172,6 +188,20 @@ mod tests {
         conn.pragma_update(None, "user_version", 999i64).unwrap();
         let err = migrations::apply(&conn).unwrap_err();
         assert!(err.to_string().contains("upgrade herdr-code-board"));
+    }
+
+    #[test]
+    fn kv_can_be_read_without_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.db");
+        Store::open(&path)
+            .unwrap()
+            .kv_set("engine.exe", "/a/b")
+            .unwrap();
+
+        assert_eq!(peek_kv(&path, "engine.exe").as_deref(), Some("/a/b"));
+        assert_eq!(peek_kv(&path, "missing"), None);
+        assert_eq!(peek_kv(Path::new("/nope/board.db"), "engine.exe"), None);
     }
 
     #[test]

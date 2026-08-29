@@ -107,6 +107,13 @@ is whole seconds, so it ties constantly. Order by `rowid`, which is insertion
 order. This produced a dispatch order that differed between machines and took
 two CI failures to pin down.
 
+**An upgrade that changes the schema is the hard case.** The previous daemon
+cannot open the migrated board at all, so the handover note has to be readable
+without migrating — that is what `store::peek_kv` is for, and why the daemon
+reads it before anything else in the loop. Get this wrong and the old daemon
+dies, nothing replaces it, and timed rules stop with no visible cause. The event
+hook calls `ensure_running` as a second line of defence.
+
 **A plugin upgrade does not restart herdr.** The startup hook does not fire, so
 the daemon from the previous build keeps the lock and keeps running the code you
 just replaced. `daemon::WANTED_EXE` in the kv table is how the incumbent learns

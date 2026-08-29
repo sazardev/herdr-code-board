@@ -124,6 +124,15 @@ Verified against herdr 0.8.2:
 - Claude Code's folder-trust dialog is an arrow list with no numbered shortcuts,
   which is why `Answer` navigates instead of typing a digit.
 
+## Paths
+
+There is one board per user. Herdr injects `HERDR_PLUGIN_CONFIG_DIR` and
+`HERDR_PLUGIN_STATE_DIR` for hooks and panes; a plain shell gets neither, so
+`Paths::resolve` reconstructs herdr's own layout — `herdr plugin config-dir <id>`
+for config, `$XDG_STATE_HOME/herdr/plugins/<id>` for state. Do not "simplify"
+that back into an XDG directory under our own name: it silently creates a second,
+empty database, and the board looks wiped.
+
 ## Before you call it done
 
 ```sh

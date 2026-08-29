@@ -24,13 +24,19 @@ pub struct Paths {
 impl Paths {
     pub fn resolve() -> Result<Self> {
         let from_herdr = env::var_os("HERDR_PLUGIN_STATE_DIR").is_some();
+        // Run from a plain shell there is no injected environment, but there is
+        // still only one board. Reconstruct herdr's own plugin directories rather
+        // than inventing a second, empty database under our own name.
         let config_dir = match env::var_os("HERDR_PLUGIN_CONFIG_DIR") {
             Some(v) => PathBuf::from(v),
-            None => xdg_dir("XDG_CONFIG_HOME", ".config")?.join("herdr-code-board"),
+            None => match herdr_config_dir() {
+                Some(dir) => dir,
+                None => xdg_dir("XDG_CONFIG_HOME", ".config")?.join(PLUGIN_ID),
+            },
         };
         let state_dir = match env::var_os("HERDR_PLUGIN_STATE_DIR") {
             Some(v) => PathBuf::from(v),
-            None => xdg_dir("XDG_STATE_HOME", ".local/state")?.join("herdr-code-board"),
+            None => herdr_state_dir()?,
         };
         std::fs::create_dir_all(&config_dir)
             .with_context(|| format!("creating config dir {}", config_dir.display()))?;
@@ -70,6 +76,45 @@ impl Paths {
     pub fn engine_log(&self) -> PathBuf {
         self.state_dir.join("engine.log")
     }
+}
+
+/// This plugin's id, as declared in `herdr-plugin.toml`. Herdr names its
+/// per-plugin directories after it.
+pub const PLUGIN_ID: &str = "herdr-code-board";
+
+/// Ask herdr where it keeps this plugin's config. Authoritative when herdr is
+/// installed; `None` when it is not, or when the answer does not exist yet.
+fn herdr_config_dir() -> Option<PathBuf> {
+    let bin = env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into());
+    let out = std::process::Command::new(bin)
+        .args(["plugin", "config-dir", PLUGIN_ID])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    path.is_dir().then_some(path)
+}
+
+/// Herdr's per-plugin state directory, `$XDG_STATE_HOME/herdr/plugins/<id>`.
+///
+/// There is no CLI command that prints this one, so it is reconstructed from the
+/// documented layout — verified against herdr 0.8.2, which injects exactly this.
+fn herdr_state_dir() -> Result<PathBuf> {
+    let herdr_owned = xdg_dir("XDG_STATE_HOME", ".local/state")?
+        .join("herdr")
+        .join("plugins")
+        .join(PLUGIN_ID);
+    if herdr_owned.is_dir() {
+        return Ok(herdr_owned);
+    }
+    // Nothing there yet. Prefer herdr's layout anyway when herdr is installed, so
+    // the board a plain shell creates is the one the hooks will later find.
+    if herdr_config_dir().is_some() {
+        return Ok(herdr_owned);
+    }
+    Ok(xdg_dir("XDG_STATE_HOME", ".local/state")?.join(PLUGIN_ID))
 }
 
 fn xdg_dir(var: &str, fallback: &str) -> Result<PathBuf> {

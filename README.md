@@ -47,6 +47,15 @@ cd herdr-code-board
 `install.sh` builds the release binary and links the working tree, because
 `herdr plugin link` deliberately does not run build commands.
 
+To use the CLI from your own shell, put it on `PATH`:
+
+```sh
+ln -sf "$PWD/target/release/herdr-code-board" ~/.local/bin/
+```
+
+It finds herdr's own plugin directories on its own, so a plain shell and the
+event hooks read and write the same board.
+
 Then, from inside a repo:
 
 ```sh
@@ -249,6 +258,9 @@ daemon           run the timer daemon in the foreground
   the event. With a single session — the normal case — that is invisible. If you
   run several named sessions at once, which one picks up a queued card is not
   determined.
+- **The CLI is not installed on `PATH` by the plugin.** Herdr only needs the
+  binary inside the plugin directory; symlink it yourself if you want the
+  commands.
 - **Timed rules need the daemon.** It is started by the plugin's startup hook. If
   you linked the plugin without restarting herdr, run `herdr-code-board startup`
   once. `doctor` tells you whether it is running.

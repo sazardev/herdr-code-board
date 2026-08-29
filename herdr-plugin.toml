@@ -1,0 +1,73 @@
+id = "herdr-code-board"
+name = "Herdr Code Board"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Kanban queue for agentic prompts: cards dispatch real agents into herdr panes, worktrees and workspaces, and rules chain one card to the next."
+# Windows is excluded because pane commands go through herdr's native Windows
+# launcher, which this plugin has not been verified against.
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# Seeds config.toml, re-imports every tracked repo's .herdr-board.toml, and starts
+# the timer daemon that fires the "waiting for more than X" rules.
+[[startup]]
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" startup"]
+
+[[panes]]
+id = "board"
+title = "Code Board"
+placement = "overlay"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" board"]
+
+[[panes]]
+id = "quick"
+title = "Code Board"
+placement = "popup"
+width = "80%"
+height = 24
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" board"]
+
+[[actions]]
+id = "open"
+title = "Open the code board"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" open"]
+
+[[actions]]
+id = "enqueue-here"
+title = "Track this repo on the board"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" repo add"]
+
+[[actions]]
+id = "sync"
+title = "Re-import .herdr-board.toml"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" sync"]
+
+[[actions]]
+id = "doctor"
+title = "Check the code board"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" doctor"]
+
+# The event hooks are the board's main nervous system: herdr fires them globally
+# whenever an agent changes state, and each one advances the affected card and
+# then dispatches whatever now fits.
+[[events]]
+id = "code-board-agent-status"
+on = "pane.agent_status_changed"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" event"]
+
+[[events]]
+id = "code-board-pane-exited"
+on = "pane.exited"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" event"]
+
+[[events]]
+id = "code-board-pane-closed"
+on = "pane.closed"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" event"]
+
+[[events]]
+id = "code-board-workspace-closed"
+on = "workspace.closed"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" event"]

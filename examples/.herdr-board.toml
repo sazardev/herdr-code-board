@@ -1,0 +1,103 @@
+# Every field herdr-code-board understands in a repo overlay.
+# Drop this at the root of a repo and run `herdr-code-board sync`.
+
+[repo]
+# Defaults to the directory name.
+name = "erp"
+tags = ["work", "backend"]
+# How many of this repo's cards may run at once.
+max_parallel = 2
+# Defaults for cards that do not name their own.
+agent = "claude"
+model = "opus"
+
+# ---------------------------------------------------------------------------
+
+[[card]]
+# `key` is the card's identity across syncs. Required.
+key = "review-diff"
+title = "Review the diff"
+prompt = """
+Review the current diff and report only actionable findings.
+Do not restate what the change does.
+"""
+# Import straight into `ready`, so `sync` starts it.
+start = true
+priority = 10
+tags = ["review"]
+
+  # When it completes, queue the tests.
+  [[card.rules]]
+  on = "done"
+  enqueue = ["run-tests"]
+
+  # If it stalls with its turn ended and nobody acting, say so — once.
+  [[card.rules]]
+  on = "waiting"
+  after = "15m"
+  notify = "review is stalled"
+  max_fires = 1
+
+# ---------------------------------------------------------------------------
+
+[[card]]
+key = "run-tests"
+title = "Run the tests"
+prompt = "Run the test suite and fix what fails."
+agent = "codex"
+model = "gpt-5-codex"
+# Extra arguments handed to the agent CLI after `--`.
+args = ["--full-auto"]
+# reuse | split | tab | workspace | worktree
+placement = "worktree"
+# `{card}` expands to the card's slug.
+branch = "board/{card}"
+base = "main"
+# Park in `waiting` for a human instead of completing on its own.
+review = true
+# Re-dispatch this many times if the pane dies.
+retries = 2
+
+  [[card.rules]]
+  on = "failed"
+  enqueue = ["report-failure"]
+
+# ---------------------------------------------------------------------------
+
+[[card]]
+key = "report-failure"
+title = "Explain the failure"
+prompt = "The test card failed. Read the last run and explain what went wrong."
+# split is the default; direction and ratio are optional.
+placement = "split"
+direction = "right"
+ratio = 0.4
+
+  [[card.rules]]
+  on = "done"
+  notify = "failure report ready"
+
+# ---------------------------------------------------------------------------
+# Answering approval dialogs automatically. This types into a dialog no human
+# read, so it also needs `allow_auto_answer = true` in the plugin's config.toml.
+#
+# [[card]]
+# key = "trusted-chore"
+# title = "Trusted chore"
+# prompt = "Run the formatter and commit."
+# auto_answer = true
+#
+#   [[card.rules]]
+#   on = "blocked"
+#   answer = 1
+#
+# Other actions available in a rule, one per rule:
+#   prompt = "are you stuck?"     send more text to the card's own agent
+#   keys = ["esc", "ctrl+c"]      raw herdr key combos
+#   retry = true                  re-dispatch from scratch
+#   cancel = true                 stop the card and release its pane
+#   close_pane = true             close the herdr pane
+#
+# Triggers: done, review, failed, blocked, and the timed forms
+#   on = "waiting", after = "15m"
+#   on = "blocked", after = "5m"

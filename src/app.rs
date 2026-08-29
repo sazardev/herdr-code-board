@@ -54,21 +54,29 @@ fn herdr() -> Arc<dyn HerdrApi> {
     Arc::new(CliHerdr::new())
 }
 
+/// Keys herdr uses for a working directory in `HERDR_PLUGIN_CONTEXT_JSON`, most
+/// specific first. Captured from a real `plugin.action.invoke` on 0.8.2, which
+/// is flat and uses prefixed names rather than a nested pane object.
+const CWD_KEYS: [&str; 4] = ["focused_pane_cwd", "workspace_cwd", "foreground_cwd", "cwd"];
+
 /// The directory the invocation came from.
 ///
 /// Herdr puts the focused pane's context in `HERDR_PLUGIN_CONTEXT_JSON` when it
 /// runs an action, which is what makes `enqueue-here` know which repo you meant.
+/// Without it we would fall back to the process cwd, which for a plugin action
+/// is the plugin's own directory — the wrong repo, silently.
+pub fn context_cwd_from(raw: Option<&str>) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(raw?).ok()?;
+    CWD_KEYS
+        .iter()
+        .find_map(|key| find_string(&value, key))
+        .map(PathBuf::from)
+}
+
 fn context_cwd() -> PathBuf {
-    if let Ok(raw) = std::env::var("HERDR_PLUGIN_CONTEXT_JSON") {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-            for key in ["foreground_cwd", "cwd"] {
-                if let Some(found) = find_string(&value, key) {
-                    return PathBuf::from(found);
-                }
-            }
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let raw = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok();
+    context_cwd_from(raw.as_deref())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn find_string(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -711,13 +719,48 @@ mod tests {
         assert_eq!(git_root(dir.path()), None);
     }
 
+    /// Real payload captured from `herdr plugin action invoke` on 0.8.2. It is
+    /// flat and uses prefixed key names, so a naive lookup for `cwd` finds nothing.
     #[test]
-    fn the_context_cwd_is_read_out_of_herdrs_nested_json() {
-        let value: serde_json::Value = serde_json::from_str(
-            r#"{"workspace":{"workspace_id":"w1"},"pane":{"pane_id":"w1:p1","cwd":"/repo/erp"}}"#,
-        )
-        .unwrap();
-        assert_eq!(find_string(&value, "cwd").as_deref(), Some("/repo/erp"));
-        assert_eq!(find_string(&value, "nope"), None);
+    fn the_context_cwd_is_read_from_herdrs_real_action_payload() {
+        let raw = r#"{
+            "correlation_id": "cli:plugin",
+            "focused_pane_agent": "claude",
+            "focused_pane_cwd": "/home/sazar/Documents/rustock",
+            "focused_pane_id": "w18:p1",
+            "invocation_source": "cli",
+            "tab_id": "w18:t1",
+            "workspace_cwd": "/home/sazar/Documents/rustock",
+            "workspace_id": "w18"
+        }"#;
+        assert_eq!(
+            context_cwd_from(Some(raw)),
+            Some(PathBuf::from("/home/sazar/Documents/rustock"))
+        );
+    }
+
+    #[test]
+    fn the_focused_pane_wins_over_the_workspace_root() {
+        let raw = r#"{"workspace_cwd":"/repo","focused_pane_cwd":"/repo/sub"}"#;
+        assert_eq!(
+            context_cwd_from(Some(raw)),
+            Some(PathBuf::from("/repo/sub"))
+        );
+    }
+
+    #[test]
+    fn a_nested_payload_still_resolves() {
+        let raw = r#"{"pane":{"pane_id":"w1:p1","cwd":"/repo/erp"}}"#;
+        assert_eq!(
+            context_cwd_from(Some(raw)),
+            Some(PathBuf::from("/repo/erp"))
+        );
+    }
+
+    #[test]
+    fn no_context_means_no_answer_rather_than_a_wrong_one() {
+        assert_eq!(context_cwd_from(None), None);
+        assert_eq!(context_cwd_from(Some("not json")), None);
+        assert_eq!(context_cwd_from(Some(r#"{"workspace_id":"w1"}"#)), None);
     }
 }

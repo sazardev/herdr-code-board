@@ -109,6 +109,19 @@ impl Executor {
                     }
                 }
                 Effect::ClearBinding => self.store.clear_binding(&card.id)?,
+                Effect::DeliverPrompt => {
+                    let current = self
+                        .store
+                        .get_card(&card.id)?
+                        .unwrap_or_else(|| card.clone());
+                    if let Err(e) = self.deliver_prompt(&current) {
+                        self.store.log_event(
+                            "prompt_failed",
+                            Some(&card.id),
+                            Some(&format!("{e:#}")),
+                        )?;
+                    }
+                }
                 Effect::FinishRun { outcome, detail } => {
                     self.store
                         .finish_open_run(&card.id, &outcome, detail.as_deref())?
@@ -138,6 +151,18 @@ impl Executor {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Hand the card's own prompt to its agent and mark the handover complete.
+    fn deliver_prompt(&mut self, card: &Card) -> Result<()> {
+        let target = self.agent_target(card)?;
+        if !card.prompt.trim().is_empty() {
+            self.herdr.prompt_agent(&target, &card.prompt)?;
+        }
+        self.store.set_prompt_sent(&card.id, true)?;
+        self.store
+            .log_event("prompt_delivered", Some(&card.id), Some(&target))?;
         Ok(())
     }
 
@@ -223,6 +248,18 @@ impl Executor {
         }
     }
 
+    /// Keys that pick the `choice`-th option of an agent dialog.
+    ///
+    /// Agent TUIs disagree about numbered shortcuts — Claude Code's trust prompt,
+    /// for one, is a plain arrow list with no digits — but they all agree on
+    /// "move down, press enter", with the cursor starting on the first option.
+    /// So navigate rather than typing a number.
+    fn answer_keys(choice: u32) -> Vec<String> {
+        let mut keys = vec!["down".to_string(); choice.saturating_sub(1) as usize];
+        keys.push("enter".to_string());
+        keys
+    }
+
     /// Answer a blocked approval dialog on the card's behalf.
     ///
     /// This types into a pane the user may be watching, so it needs two
@@ -257,12 +294,12 @@ impl Executor {
             }
         }
 
-        let key = choice.to_string();
-        self.herdr.send_keys(&target, std::slice::from_ref(&key))?;
+        let keys = Self::answer_keys(choice);
+        self.herdr.send_keys(&target, &keys)?;
         self.store
             .note_open_run(&card.id, &format!("auto-answered choice {choice}"))?;
         self.store
-            .log_event("auto_answered", Some(&card.id), Some(&key))?;
+            .log_event("auto_answered", Some(&card.id), Some(&keys.join(" ")))?;
         Ok(())
     }
 
@@ -364,14 +401,20 @@ impl Executor {
         {
             Ok(()) => {}
             Err(e) if e.to_string().contains(AGENT_NOT_READY) => {
-                // The agent is up but sitting on a startup dialog. Park the card in
-                // `blocked` and let the status events drive it from here.
-                self.store.set_lane(&card.id, Column::Blocked)?;
+                // The agent is up but sitting on a startup dialog. Route that
+                // through the reducer rather than setting the lane directly, so
+                // the card's `on blocked` rules still get their chance — that is
+                // the whole point of a rule that answers a trust prompt.
                 self.store.log_event(
                     "agent_not_ready",
                     Some(&card.id),
                     Some("started but blocked on a startup dialog"),
                 )?;
+                let current = self
+                    .store
+                    .get_card(&card.id)?
+                    .unwrap_or_else(|| card.clone());
+                self.feed(&current, Input::AgentStatus(AgentStatus::Blocked))?;
                 return Ok(true);
             }
             Err(e) => {
@@ -458,5 +501,24 @@ impl Executor {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude Code's trust prompt is an arrow list with no numbered shortcuts, so
+    /// answering has to navigate rather than type a digit.
+    #[test]
+    fn answering_navigates_to_the_option_instead_of_typing_a_number() {
+        assert_eq!(Executor::answer_keys(1), vec!["enter"]);
+        assert_eq!(Executor::answer_keys(2), vec!["down", "enter"]);
+        assert_eq!(Executor::answer_keys(3), vec!["down", "down", "enter"]);
+    }
+
+    #[test]
+    fn choice_zero_is_treated_as_the_first_option_rather_than_underflowing() {
+        assert_eq!(Executor::answer_keys(0), vec!["enter"]);
     }
 }

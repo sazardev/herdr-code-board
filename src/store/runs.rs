@@ -38,9 +38,19 @@ impl Store {
         Ok(run)
     }
 
+    /// Close a run. A `None` detail leaves whatever notes the run accumulated;
+    /// otherwise the audit trail written by [`Store::note_open_run`] — including
+    /// what an approval dialog said before a rule answered it — would be erased
+    /// the moment the run ends.
     pub fn finish_run(&self, run_id: &str, outcome: &str, detail: Option<&str>) -> Result<()> {
         self.conn().execute(
-            "UPDATE runs SET ended_at = ?2, outcome = ?3, detail = ?4 WHERE id = ?1",
+            "UPDATE runs SET ended_at = ?2, outcome = ?3,
+                detail = CASE
+                    WHEN ?4 IS NULL THEN detail
+                    WHEN detail IS NULL OR detail = '' THEN ?4
+                    ELSE detail || char(10) || ?4
+                END
+             WHERE id = ?1",
             params![run_id, now(), outcome, detail],
         )?;
         Ok(())
@@ -55,7 +65,12 @@ impl Store {
         detail: Option<&str>,
     ) -> Result<()> {
         self.conn().execute(
-            "UPDATE runs SET ended_at = ?2, outcome = ?3, detail = ?4
+            "UPDATE runs SET ended_at = ?2, outcome = ?3,
+                detail = CASE
+                    WHEN ?4 IS NULL THEN detail
+                    WHEN detail IS NULL OR detail = '' THEN ?4
+                    ELSE detail || char(10) || ?4
+                END
              WHERE id = (SELECT id FROM runs WHERE card_id = ?1 AND ended_at IS NULL
                          ORDER BY started_at DESC LIMIT 1)",
             params![card_id, now(), outcome, detail],
@@ -109,6 +124,46 @@ mod tests {
         assert_eq!(second.outcome.as_deref(), Some("done"));
         assert_eq!(first.outcome.as_deref(), Some("failed"));
         assert_eq!(first.detail.as_deref(), Some("boom"));
+    }
+
+    /// Closing a run must not erase what happened during it. Found live: the
+    /// dialog text recorded before an auto-answer was wiped by the `done`.
+    #[test]
+    fn finishing_a_run_preserves_the_notes_it_gathered() {
+        let store = Store::open_in_memory().unwrap();
+        let card = store.create_card(&NewCard::new("a", "claude")).unwrap();
+        store.start_run(&card.id, 1).unwrap();
+        store
+            .note_open_run(&card.id, "dialog: trust this folder?")
+            .unwrap();
+
+        store.finish_open_run(&card.id, "done", None).unwrap();
+
+        let run = &store.runs_for_card(&card.id, 1).unwrap()[0];
+        assert_eq!(run.outcome.as_deref(), Some("done"));
+        assert_eq!(
+            run.detail.as_deref(),
+            Some("dialog: trust this folder?"),
+            "the audit trail must survive the run ending"
+        );
+    }
+
+    #[test]
+    fn a_closing_detail_is_appended_rather_than_replacing_the_notes() {
+        let store = Store::open_in_memory().unwrap();
+        let card = store.create_card(&NewCard::new("a", "claude")).unwrap();
+        let run = store.start_run(&card.id, 1).unwrap();
+        store.note_open_run(&card.id, "answered choice 2").unwrap();
+        store
+            .finish_run(&run.id, "failed", Some("pane vanished"))
+            .unwrap();
+
+        let detail = store.runs_for_card(&card.id, 1).unwrap()[0]
+            .detail
+            .clone()
+            .unwrap();
+        assert!(detail.contains("answered choice 2"));
+        assert!(detail.contains("pane vanished"));
     }
 
     #[test]

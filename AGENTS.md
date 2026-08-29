@@ -81,6 +81,26 @@ log. `tests/engine_lifecycle.rs` runs the full lifecycle against it.
 - **Auto-answer needs two switches.** `config.allow_auto_answer` *and*
   `card.auto_answer`. Do not collapse them, and do not add a third way in.
 
+## Bugs the fake could not have caught
+
+Three defects survived 140 passing tests and only showed up the first time this
+ran against a live herdr with a real agent. They are fixed and pinned by tests
+now, but they are the shape of thing to watch for:
+
+1. **A card blocked at startup skipped its own rules.** `dispatch` set the lane
+   to `blocked` directly on `agent_not_ready`, bypassing the reducer, so the
+   `on blocked -> answer` rule — the entire reason that rule exists — never
+   fired. Dispatch now routes that through `feed`.
+2. **Such a card then never got its prompt.** `prompt_sent` was false and the
+   agent went idle, which the reducer read as "still booting". It now emits
+   `Effect::DeliverPrompt` for a live card whose handover never completed.
+3. **Closing a run erased its notes.** `finish_open_run(.., None)` wrote a NULL
+   over the dialog text recorded before an auto-answer. Both finishers now
+   preserve, and append to, the existing detail.
+
+The lesson: the fake models the happy path you thought of. Anything involving an
+agent's *startup* — dialogs, trust prompts, slow boots — needs a real run.
+
 ## Herdr facts this depends on
 
 Verified against herdr 0.8.2:
@@ -98,6 +118,11 @@ Verified against herdr 0.8.2:
   plugin uses hooks rather than a socket subscription.
 - Agent names must match `[a-z][a-z0-9_-]{0,31}` and be unique among live agents.
   `Card::slug` enforces both, with a test.
+- `HERDR_PLUGIN_CONTEXT_JSON` for an action is **flat**, with prefixed keys
+  (`focused_pane_cwd`, `workspace_cwd`) — not a nested pane object. Looking for a
+  bare `cwd` finds nothing and silently falls back to the plugin's own directory.
+- Claude Code's folder-trust dialog is an arrow list with no numbered shortcuts,
+  which is why `Answer` navigates instead of typing a digit.
 
 ## Before you call it done
 

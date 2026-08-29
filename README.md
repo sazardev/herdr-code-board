@@ -138,6 +138,16 @@ herdr-code-board add "trusted chore" --auto-answer ...
 Both default to off. Before answering, the engine records what the dialog said
 into the card's run history, so there is an audit trail of what got approved.
 
+Answering **navigates** — `down` × (choice − 1), then `enter` — rather than
+typing a digit. Agent TUIs disagree about numbered shortcuts (Claude Code's trust
+prompt is a plain arrow list with no numbers at all), but they all agree on move
+and confirm. That assumes the cursor starts on the first option, which is what
+every dialog seen so far does. For anything else, use a `keys` rule and spell out
+the key sequence yourself.
+
+A card that comes up blocked on a startup dialog keeps its prompt in hand: the
+prompt is delivered once the dialog clears and the agent is ready, not before.
+
 ## Repo overlays
 
 A repo can carry its own cards in `.herdr-board.toml`. `sync` imports them
@@ -231,6 +241,18 @@ sync             re-import .herdr-board.toml
 doctor           check herdr, the database, the daemon and the model flags
 daemon           run the timer daemon in the foreground
 ```
+
+## Known limitations
+
+- **The board is global; herdr sessions are not.** Cards live in one database
+  for your user, but an event hook dispatches into whichever herdr session fired
+  the event. With a single session — the normal case — that is invisible. If you
+  run several named sessions at once, which one picks up a queued card is not
+  determined.
+- **Timed rules need the daemon.** It is started by the plugin's startup hook. If
+  you linked the plugin without restarting herdr, run `herdr-code-board startup`
+  once. `doctor` tells you whether it is running.
+- **Model flags for most agent kinds are assumed, not verified.** See above.
 
 ## Not in 0.1.0
 

@@ -59,28 +59,57 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Line::from(spans), area);
 }
 
+/// A lane narrower than this cannot show a card title, so it is worse than not
+/// showing the lane at all.
+const MIN_LANE_WIDTH: u16 = 18;
+
+/// Which slice of the lanes to render, given the space available.
+///
+/// Nine lanes in a narrow split pane come out three characters wide and useless.
+/// So render as many whole lanes as fit and scroll the window to keep the
+/// selected one visible, the way any kanban board does.
+pub fn lane_window(width: u16, lane_count: usize, selected: usize) -> (usize, usize) {
+    let fits = ((width / MIN_LANE_WIDTH) as usize).clamp(1, lane_count);
+    if fits >= lane_count {
+        return (0, lane_count);
+    }
+    // Centre the selection in the window, then clamp to the ends.
+    let half = fits / 2;
+    let start = selected.saturating_sub(half).min(lane_count - fits);
+    (start, fits)
+}
+
 fn draw_lanes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    // The selected lane gets double width so long titles stay readable even with
-    // nine lanes on screen.
-    let weights: Vec<Constraint> = Column::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, _)| Constraint::Fill(if i == app.lane { 2 } else { 1 }))
+    let (start, count) = lane_window(area.width, Column::ALL.len(), app.lane);
+    let lanes = &Column::ALL[start..start + count];
+
+    // The selected lane gets double width so long titles stay readable.
+    let weights: Vec<Constraint> = (start..start + count)
+        .map(|i| Constraint::Fill(if i == app.lane { 2 } else { 1 }))
         .collect();
     let columns = Layout::horizontal(weights).split(area);
 
-    for (i, lane) in Column::ALL.iter().enumerate() {
+    for (slot, lane) in lanes.iter().enumerate() {
+        let i = start + slot;
         let selected = i == app.lane;
         let cards = app.lane_cards(*lane);
         let color = theme.lane(*lane);
 
+        // Tell the reader when lanes are scrolled off an edge.
+        let edge = if slot == 0 && start > 0 {
+            "\u{2039}"
+        } else if slot + 1 == count && start + count < Column::ALL.len() {
+            "\u{203a}"
+        } else {
+            ""
+        };
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", lane.title()),
                 Style::default().fg(color).bold(),
             ),
             Span::styled(
-                format!("{} ", cards.len()),
+                format!("{}{} ", cards.len(), edge),
                 Style::default().fg(theme.muted),
             ),
         ]);
@@ -128,7 +157,7 @@ fn draw_lanes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             List::new(items)
                 .block(block)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            columns[i],
+            columns[slot],
             &mut state,
         );
     }
@@ -373,4 +402,52 @@ fn draw_confirm(frame: &mut Frame, question: &str, theme: &Theme) {
         ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_board_shows_every_lane() {
+        assert_eq!(lane_window(200, 9, 0), (0, 9));
+        assert_eq!(lane_window(9 * MIN_LANE_WIDTH, 9, 4), (0, 9));
+    }
+
+    /// A nine-lane board in a 47-column split pane gives three-character lanes.
+    /// Show fewer, wider lanes instead.
+    #[test]
+    fn a_narrow_board_shows_a_window_around_the_selection() {
+        let (start, count) = lane_window(47, 9, 0);
+        assert_eq!(count, 2);
+        assert_eq!(start, 0);
+
+        let (start, count) = lane_window(47, 9, 4);
+        assert_eq!(count, 2);
+        assert!(
+            (start..start + count).contains(&4),
+            "the selected lane must be inside the window"
+        );
+    }
+
+    #[test]
+    fn the_window_never_runs_off_either_end() {
+        for selected in 0..9 {
+            let (start, count) = lane_window(90, 9, selected);
+            assert!(start + count <= 9, "selected {selected}");
+            assert!(
+                (start..start + count).contains(&selected),
+                "selected {selected} fell outside {start}..{}",
+                start + count
+            );
+        }
+        assert_eq!(lane_window(90, 9, 8).0, 9 - (90 / MIN_LANE_WIDTH) as usize);
+    }
+
+    #[test]
+    fn a_terminal_too_narrow_for_even_one_lane_still_renders_one() {
+        let (start, count) = lane_window(5, 9, 3);
+        assert_eq!(count, 1);
+        assert_eq!(start, 3, "and it is the one you selected");
+    }
 }

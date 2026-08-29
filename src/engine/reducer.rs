@@ -29,6 +29,9 @@ pub enum Effect {
         outcome: String,
         detail: Option<String>,
     },
+    /// Send the card's own prompt to its agent. Emitted when the agent becomes
+    /// ready after a startup dialog delayed the handover.
+    DeliverPrompt,
     /// Forget the herdr pane/agent this card owned.
     ClearBinding,
     /// Append to the card's audit trail.
@@ -112,6 +115,18 @@ fn on_status(card: &Card, rules: &[Rule], status: AgentStatus) -> Vec<Effect> {
         // A late event about a card we already closed changes nothing.
         return out;
     }
+
+    // The agent became ready before we managed to hand over the prompt — which is
+    // what happens when a startup dialog blocked the dispatch. Deliver it now,
+    // otherwise the card sits in its pane forever with nothing asked of it.
+    if !card.prompt_sent
+        && card.column.is_live()
+        && matches!(status, AgentStatus::Idle | AgentStatus::Done)
+    {
+        out.push(Effect::DeliverPrompt);
+        return out;
+    }
+
     let Some(lane) = lane_for_status(card, status) else {
         return out;
     };
@@ -272,10 +287,25 @@ mod tests {
         assert_eq!(effects, vec![Effect::Lane(Column::Waiting)]);
     }
 
+    /// A card blocked on a startup dialog owns a pane but never received its
+    /// prompt. When the dialog clears, the prompt has to go out, or the card sits
+    /// there with an idle agent and nothing asked of it.
     #[test]
-    fn an_idle_agent_that_has_not_been_prompted_yet_is_not_waiting() {
-        // Between `agent start` and `agent prompt` the agent is idle by design.
-        let mut c = card(Column::Running);
+    fn an_agent_that_becomes_ready_before_the_handover_gets_the_prompt_then() {
+        for column in [Column::Running, Column::Blocked] {
+            let mut c = card(column);
+            c.prompt_sent = false;
+            assert_eq!(
+                step(&c, &[], &Input::AgentStatus(AgentStatus::Idle)),
+                vec![Effect::DeliverPrompt],
+                "from {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_that_owns_no_pane_is_not_prompted() {
+        let mut c = card(Column::Backlog);
         c.prompt_sent = false;
         assert!(step(&c, &[], &Input::AgentStatus(AgentStatus::Idle)).is_empty());
     }

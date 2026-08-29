@@ -313,7 +313,7 @@ fn auto_answer_records_the_dialog_before_answering_it() {
 
     assert_eq!(
         h.herdr.calls_matching("send-keys"),
-        vec![format!("agent send-keys {pane} 1")]
+        vec![format!("agent send-keys {pane} enter")]
     );
     // Only the cheap read source may be used against a pane a human is watching.
     let reads = h.herdr.calls_matching("pane read");
@@ -326,6 +326,14 @@ fn auto_answer_records_the_dialog_before_answering_it() {
         .unwrap();
     assert!(detail.contains("Do you want to make this edit?"));
     assert!(detail.contains("auto-answered choice 1"));
+
+    // The audit trail has to survive the run being closed.
+    h.exec.store.finish_open_run(&id, "done", None).unwrap();
+    let after = h.exec.store.runs_for_card(&id, 1).unwrap()[0]
+        .detail
+        .clone()
+        .unwrap();
+    assert_eq!(after, detail);
 }
 
 #[test]
@@ -488,4 +496,82 @@ fn enqueueing_a_card_that_is_already_running_does_not_restart_it() {
     assert_eq!(h.herdr.calls_matching("agent start").len(), 2);
     let events = h.exec.store.recent_events(30).unwrap();
     assert!(events.iter().any(|e| e.kind == "enqueue_skipped"));
+}
+
+/// The real shape of starting Claude Code in a folder it has not seen: the agent
+/// comes up on a trust prompt, a rule answers it, and only then does the card's
+/// own prompt go out. Found by running this against a live herdr, not a fake.
+#[test]
+fn a_card_blocked_on_a_startup_dialog_is_answered_and_then_prompted() {
+    let config = Config {
+        allow_auto_answer: true,
+        ..Config::default()
+    };
+    let mut h = Harness::with_config(config);
+    let first = h.card_with(NewCard {
+        repo_id: Some(h.repo_id()),
+        column: Column::Ready,
+        prompt: "Reply with exactly: ALPHA".into(),
+        auto_answer: true,
+        ..NewCard::new("step a", "claude")
+    });
+    let second = h.card_with(NewCard {
+        repo_id: Some(h.repo_id()),
+        column: Column::Backlog,
+        ..NewCard::new("step b", "claude")
+    });
+    h.exec
+        .store
+        .add_rule(
+            Some(&first),
+            None,
+            &Trigger::Blocked,
+            &Action::Answer { choice: 2 },
+            2,
+        )
+        .unwrap();
+    h.exec
+        .store
+        .add_rule(
+            Some(&first),
+            None,
+            &Trigger::Done,
+            &Action::Enqueue {
+                cards: vec![second.clone()],
+            },
+            0,
+        )
+        .unwrap();
+
+    // Herdr reports the agent as started but sitting on a dialog.
+    h.herdr.fail_on("agent start", "agent_not_ready");
+    h.exec.dispatch_ready().unwrap();
+    let pane = h.pane_of(&first);
+
+    // The blocked rule fired even though nothing routed through a status event.
+    assert_eq!(h.lane(&first), Column::Blocked);
+    assert_eq!(
+        h.herdr.calls_matching("send-keys"),
+        vec![format!("agent send-keys {pane} down enter")],
+        "option 2 means one down, then enter"
+    );
+    assert!(
+        h.herdr.calls_matching("agent prompt").is_empty(),
+        "the prompt must wait until the dialog clears"
+    );
+
+    // The dialog clears and the agent is ready. Now the prompt goes out.
+    h.exec.on_agent_status(&pane, AgentStatus::Idle).unwrap();
+    assert_eq!(
+        h.herdr.calls_matching("agent prompt"),
+        vec![format!("agent prompt {pane} Reply with exactly: ALPHA")]
+    );
+    assert_eq!(h.lane(&first), Column::Blocked, "no lane change yet");
+
+    // From here it is an ordinary turn, and the chain still works.
+    h.exec.on_agent_status(&pane, AgentStatus::Working).unwrap();
+    assert_eq!(h.lane(&first), Column::Running);
+    h.exec.on_agent_status(&pane, AgentStatus::Done).unwrap();
+    assert_eq!(h.lane(&first), Column::Done);
+    assert_eq!(h.lane(&second), Column::Ready);
 }

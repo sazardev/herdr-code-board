@@ -20,7 +20,7 @@ use crate::model::Column;
 use crate::overlay;
 use crate::store::Store;
 
-use state::{App, Key, Request};
+use state::{App, Key, PickerTarget, RepoChoice, Request};
 use theme::Theme;
 
 /// Translate a terminal event into the app's own key type.
@@ -208,6 +208,48 @@ fn execute(
         Request::Update(card) => {
             store.update_card(&card)?;
             app.status = format!("saved {}", card.title);
+        }
+
+        Request::ScanRepos(target) => {
+            let items: Vec<RepoChoice> = crate::app::scan(&store, config.roots())?
+                .into_iter()
+                .map(|c| RepoChoice {
+                    name: c.found.name,
+                    path: c.found.path,
+                    branch: c.found.branch,
+                    tracked: c.tracked,
+                })
+                .collect();
+            app.open_picker(items, target);
+        }
+
+        Request::UseRepo { path, target } => {
+            // Tracking is idempotent, so picking an already-tracked repo just
+            // refreshes its overlay.
+            overlay::sync_repo(&store, &path, &config.default_agent)?;
+            app.load(store.list_cards()?, store.list_repos()?);
+            match target {
+                PickerTarget::Filter => {
+                    app.filter_by_path(&path);
+                    app.status = format!("showing {}", app.filter_label());
+                }
+                PickerTarget::Form => {
+                    app.form_repo_by_path(&path);
+                    app.set_branches(crate::git::branches(&path).unwrap_or_default());
+                    let branch = crate::git::head_branch(&path);
+                    app.status = format!(
+                        "card will run in {} on {}",
+                        path.file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        branch.as_deref().unwrap_or("(detached)")
+                    );
+                }
+            }
+        }
+
+        Request::LoadBranches(path) => {
+            app.set_branches(crate::git::branches(&path).unwrap_or_default());
         }
     }
     Ok(())

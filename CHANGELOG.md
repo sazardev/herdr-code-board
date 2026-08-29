@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0
+
+Repositories are found, not typed.
+
+- `repo scan` walks your home directory for checkouts and reports each one with
+  its current branch and whether the board tracks it. ~90 ms for 58 repos;
+  `.git/HEAD` is read directly rather than invoking git per directory.
+- `t` in the board opens a searchable picker over everything found, with
+  subsequence matching (`hcb` → `herdr-code-board`). It also backs the repo
+  field of the new-card form.
+- `add` now attaches the card to the repository you are standing in, tracking it
+  on the first use. Previously it silently created a repo-less card.
+- `repo add` accepts a project name as well as a path, and outside a checkout it
+  lists what it found instead of failing.
+- A `worktree` card with no `--base` branches from wherever the repo is now,
+  resolved in the engine so every entry point agrees. A named base is validated
+  against the repo's real branches at creation time, with the list in the error.
+- The form grows `branch` and `from` fields when the placement is `worktree`,
+  the latter a chooser over that repo's branches.
+- `repo ls` shows branch, card counts and live counts.
+
 ## 0.1.0
 
 First release.

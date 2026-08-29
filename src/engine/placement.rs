@@ -152,6 +152,13 @@ pub fn resolve(
             // `worktree create` needs an existing workspace to hang the repo off.
             let host = ensure_workspace(api, repo_path, repo_name)?;
             let branch = branch.replace("{card}", slug);
+            // No base named means "from wherever this repo is now", which is what
+            // someone queuing work from that checkout means. Resolving it here
+            // rather than passing None keeps every entry point consistent, and
+            // stops git from picking a default branch that is not the one on screen.
+            let base = base
+                .clone()
+                .or_else(|| crate::git::head_branch(std::path::Path::new(repo_path)));
             let created =
                 api.create_worktree(&host.workspace_id, &branch, base.as_deref(), Some(&branch))?;
             let pane = root_pane_of(api, &created)?;
@@ -329,6 +336,31 @@ mod tests {
             "a worktree gets its own workspace"
         );
         assert!(target.worktree_path.is_some());
+    }
+
+    #[test]
+    fn a_worktree_with_no_base_branches_from_where_the_repo_is_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/develop\n").unwrap();
+
+        let path = repo.to_string_lossy().to_string();
+        let h = FakeHerdr::new().with_workspace("w1", "erp", &path);
+        resolve(
+            &h,
+            &path,
+            "erp",
+            &Placement::Worktree {
+                branch: "board/x".into(),
+                base: None,
+            },
+            "rev-1",
+        )
+        .unwrap();
+
+        let call = &h.calls_matching("worktree create")[0];
+        assert!(call.contains("--base develop"), "got: {call}");
     }
 
     #[test]

@@ -89,7 +89,13 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCommand {
+    /// Look for checkouts on disk and show what is already tracked.
+    Scan(ScanArgs),
+
     /// Track a repository, importing its overlay file if it has one.
+    ///
+    /// With no path, tracks the repository you are standing in. If you are not
+    /// in one, it lists what it found instead of failing.
     Add {
         path: Option<PathBuf>,
         #[arg(long)]
@@ -108,6 +114,23 @@ pub enum RepoCommand {
     Ls,
     /// Stop tracking a repository. Its cards become global.
     Rm { repo: String },
+}
+
+#[derive(Debug, Args)]
+pub struct ScanArgs {
+    /// Look here instead of the configured roots.
+    pub paths: Vec<PathBuf>,
+    /// Track everything found, not just list it.
+    #[arg(long)]
+    pub add: bool,
+    /// Directory levels to descend. Defaults to the configured `scan_depth`.
+    #[arg(long)]
+    pub depth: Option<usize>,
+    /// Only repositories whose name or path contains this.
+    #[arg(long)]
+    pub filter: Option<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -154,7 +177,7 @@ pub struct AddArgs {
     #[arg(long, default_value = "board/{card}")]
     pub branch: String,
 
-    /// Base ref for `--placement worktree`.
+    /// Base ref for `--placement worktree`. Defaults to the repo's current branch.
     #[arg(long)]
     pub base: Option<String>,
 
@@ -285,7 +308,9 @@ pub enum TriggerArg {
 }
 
 impl AddArgs {
-    pub fn placement(&self) -> crate::model::Placement {
+    /// `base` is resolved by the caller, which knows the repo and can default it
+    /// to whatever branch that repo is actually on.
+    pub fn placement_with_base(&self, base: Option<String>) -> crate::model::Placement {
         use crate::model::Placement as P;
         match self.placement {
             PlacementArg::Reuse => P::Reuse,
@@ -297,9 +322,18 @@ impl AddArgs {
             PlacementArg::Workspace => P::NewWorkspace,
             PlacementArg::Worktree => P::Worktree {
                 branch: self.branch.clone(),
-                base: self.base.clone(),
+                base,
             },
         }
+    }
+
+    pub fn placement(&self) -> crate::model::Placement {
+        self.placement_with_base(self.base.clone())
+    }
+
+    /// True when the placement actually cuts a branch, so a base ref matters.
+    pub fn needs_base(&self) -> bool {
+        matches!(self.placement, PlacementArg::Worktree)
     }
 
     /// The prompt text, reading the file or stdin when asked to.

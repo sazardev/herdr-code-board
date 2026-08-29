@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use ratatui::Frame;
 
 use super::form::{placement_summary, Field, Flag};
-use super::state::{App, Mode};
+use super::state::{App, Mode, PickerTarget};
 use super::theme::Theme;
 use crate::app::ago;
 use crate::model::Column;
@@ -27,7 +27,14 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
     draw_status(frame, status, app, theme);
 
     match &app.mode {
+        // The form stays visible behind its picker, so you keep your place.
         Mode::Form => draw_form(frame, app, theme),
+        Mode::RepoPicker => {
+            if app.form.is_some() {
+                draw_form(frame, app, theme);
+            }
+            draw_picker(frame, app, theme);
+        }
         Mode::Help => draw_help(frame, theme),
         Mode::Confirm(question) => draw_confirm(frame, question, theme),
         _ => {}
@@ -241,7 +248,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let text = if app.status.is_empty() {
-        "hjkl move · HL shift lane · space queue · enter jump to pane · n new · e edit · x cancel · r retry · d delete · / search · tab repo · s sync · ? help · q quit".to_string()
+        "hjkl move · HL shift lane · space queue · enter jump to pane · n new · e edit · t repos · x cancel · r retry · d delete · / search · s sync · ? help · q quit".to_string()
     } else {
         app.status.clone()
     };
@@ -270,7 +277,8 @@ fn popup(frame: &Frame, width: u16, height: u16) -> Rect {
 
 fn draw_form(frame: &mut Frame, app: &App, theme: &Theme) {
     let Some(form) = &app.form else { return };
-    let area = popup(frame, 74, (Field::ALL.len() + 4) as u16);
+    let fields = form.fields();
+    let area = popup(frame, 78, (fields.len() + 4) as u16);
     frame.render_widget(Clear, area);
 
     let title = if form.editing.is_some() {
@@ -287,7 +295,7 @@ fn draw_form(frame: &mut Frame, app: &App, theme: &Theme) {
         ));
 
     let mut lines = Vec::new();
-    for (i, field) in Field::ALL.iter().enumerate() {
+    for (i, field) in fields.iter().enumerate() {
         let active = i == form.field;
         let value = match field {
             Field::Title => form.title.clone(),
@@ -300,6 +308,11 @@ fn draw_form(frame: &mut Frame, app: &App, theme: &Theme) {
             Field::Agent => form.agent_kind(),
             Field::Model => form.model.clone(),
             Field::Placement => form.placement_name().to_string(),
+            Field::Branch => form.branch.clone(),
+            Field::Base => match form.base_name() {
+                Some(b) => b.to_string(),
+                None => "(repo's current branch)".to_string(),
+            },
             Field::Tags => form.tags.clone(),
             Field::Args => form.args.clone(),
             Field::Flags => Flag::ALL
@@ -331,11 +344,113 @@ fn draw_form(frame: &mut Frame, app: &App, theme: &Theme) {
         lines.push(Line::from(spans));
     }
     lines.push(Line::from(Span::styled(
-        " tab/↑↓ field · ←→ choose · space toggle · enter save · esc cancel",
+        " tab/↑↓ field · ←→ choose · space toggle · enter saves (on repo: picks) · esc cancel",
         Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_picker(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(picker) = &app.picker else { return };
+    let matches = picker.matches();
+
+    let rows = matches.len().clamp(1, 14) as u16;
+    let area = popup(frame, 84, rows + 4);
+    frame.render_widget(Clear, area);
+
+    let heading = match picker.target {
+        PickerTarget::Form => " run this card in… ",
+        PickerTarget::Filter => " repositories ",
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            heading,
+            Style::default().fg(theme.accent).bold(),
+        ))
+        .title_bottom(Span::styled(
+            format!(
+                " {}/{} · type to filter · ↑↓ move · enter pick · esc back ",
+                matches.len(),
+                picker.items.len()
+            ),
+            Style::default().fg(theme.muted),
+        ));
+
+    let [search, list] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(block.inner(area));
+    frame.render_widget(block, area);
+
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled(" › ", Style::default().fg(theme.accent)),
+            Span::raw(picker.query.clone()),
+            Span::styled("_", Style::default().fg(theme.accent)),
+        ]),
+        search,
+    );
+
+    let items: Vec<ListItem> = matches
+        .iter()
+        .map(|choice| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if choice.tracked { " ● " } else { " ○ " },
+                    Style::default().fg(if choice.tracked {
+                        theme.done
+                    } else {
+                        theme.muted
+                    }),
+                ),
+                Span::styled(
+                    format!("{:<26}", truncate(&choice.name, 25)),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<24}",
+                        truncate(choice.branch.as_deref().unwrap_or("(detached)"), 23)
+                    ),
+                    Style::default().fg(theme.waiting),
+                ),
+                Span::styled(
+                    home_relative(&choice.path),
+                    Style::default().fg(theme.muted),
+                ),
+            ]))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    if !matches.is_empty() {
+        state.select(Some(picker.cursor.min(matches.len() - 1)));
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        list,
+        &mut state,
+    );
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!(
+        "{}…",
+        s.chars().take(max.saturating_sub(1)).collect::<String>()
+    )
+}
+
+/// `/home/you/Documents/x` reads better as `~/Documents/x`.
+fn home_relative(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    match std::env::var("HOME") {
+        Ok(home) if text.starts_with(&home) => format!("~{}", &text[home.len()..]),
+        _ => text,
+    }
 }
 
 const HELP: &[(&str, &str)] = &[
@@ -351,6 +466,7 @@ const HELP: &[(&str, &str)] = &[
     ("r", "re-dispatch the card from scratch"),
     ("d", "delete the card (asks first)"),
     ("/", "search titles, prompts and tags"),
+    ("t", "pick a repository — scans your disk for checkouts"),
     ("tab", "cycle the repo filter"),
     ("s", "re-import .herdr-board.toml from tracked repos"),
     ("R", "reload from the database"),

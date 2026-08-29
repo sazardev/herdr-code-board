@@ -13,7 +13,7 @@ use crate::engine::events::PluginEvent;
 use crate::engine::lock::DispatchLock;
 use crate::herdr::client::CliHerdr;
 use crate::herdr::HerdrApi;
-use crate::model::{Action, Card, Column, Repo};
+use crate::model::{Action, Card, Column, Placement, Repo};
 use crate::store::cards::NewCard;
 use crate::store::{now, Store};
 use crate::{agents, overlay};
@@ -28,8 +28,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Startup => startup(&paths, &config),
         Command::Event => event(&paths, &config),
         Command::Open => open_board(),
-        Command::Add(args) => add(&paths, &config, args, None),
-        Command::EnqueueHere(args) => {
+        // Both attach the card to the repository you are standing in. `add` is
+        // what you type; `enqueue-here` is the same thing wired to a herdr action,
+        // where the directory comes from the focused pane rather than the shell.
+        Command::Add(args) | Command::EnqueueHere(args) => {
             let cwd = context_cwd();
             add(&paths, &config, args, Some(cwd))
         }
@@ -182,20 +184,35 @@ fn resolve_repo_for(
     cwd: Option<PathBuf>,
 ) -> Result<Option<Repo>> {
     if let Some(needle) = explicit {
-        return match store.resolve_repo(needle)? {
-            Some(r) => Ok(Some(r)),
-            None => bail!("no tracked repo matches {needle:?}; try `repo add`"),
+        if let Some(r) = store.resolve_repo(needle)? {
+            return Ok(Some(r));
+        }
+        // Not tracked yet, but it may well be sitting on disk. Track it rather
+        // than making the user run a second command for no reason.
+        return match find_on_disk(store, config, needle)? {
+            Some(path) => {
+                let report = overlay::sync_repo(store, &path, &config.default_agent)?;
+                eprintln!("tracking {}", path.display());
+                store.get_repo(&report.repo_id)
+            }
+            None => bail!(
+                "no repo matches {needle:?}; run `herdr-code-board repo scan` to see what is around"
+            ),
         };
     }
     let Some(cwd) = cwd else {
         return Ok(None);
     };
-    let root = git_root(&cwd).unwrap_or(cwd);
+    // Outside a checkout there is no repo to attach to, and inventing one from
+    // the current directory would track ~/Downloads the first time you slipped.
+    let Some(root) = crate::git::root_of(&cwd) else {
+        return Ok(None);
+    };
     let path = root.to_string_lossy().to_string();
     if let Some(found) = store.find_repo_by_path(&path)? {
         return Ok(Some(found));
     }
-    // Track it on the spot; this is what makes `enqueue-here` a one-step action.
+    // Track it on the spot: this is what makes adding a card a one-step action.
     let report = overlay::sync_repo(store, &root, &config.default_agent)?;
     store.get_repo(&report.repo_id)
 }
@@ -213,6 +230,15 @@ fn add(paths: &Paths, config: &Config, args: AddArgs, cwd: Option<PathBuf>) -> R
         bail!("{agent_kind:?} is not a herdr agent kind; run `herdr agent` for the list");
     }
 
+    // A worktree needs something to branch from. Default it to whatever the repo
+    // is actually on, and refuse a base that does not exist rather than letting
+    // `worktree create` fail later with `invalid reference`.
+    let base = if args.needs_base() {
+        resolve_base(repo.as_ref(), args.base.as_deref())?
+    } else {
+        args.base.clone()
+    };
+
     let card = store.create_card(&NewCard {
         key: None,
         title: args.title.clone(),
@@ -225,7 +251,7 @@ fn add(paths: &Paths, config: &Config, args: AddArgs, cwd: Option<PathBuf>) -> R
             .clone()
             .or_else(|| repo.as_ref().and_then(|r| r.default_model.clone())),
         extra_args: args.args.clone(),
-        placement: args.placement(),
+        placement: args.placement_with_base(base),
         column: if args.start {
             Column::Ready
         } else {
@@ -237,11 +263,59 @@ fn add(paths: &Paths, config: &Config, args: AddArgs, cwd: Option<PathBuf>) -> R
         max_retries: args.retries,
     })?;
 
-    println!("{}  {}  [{}]", card.id, card.title, card.column);
+    println!(
+        "{}  {}  [{}]  {}",
+        card.id,
+        card.title,
+        card.column,
+        repo.as_ref()
+            .map(|r| r.name.as_str())
+            .unwrap_or("no repo — runs from $HOME")
+    );
+    if let Placement::Worktree { branch, base } = &card.placement {
+        println!(
+            "  worktree {} from {}",
+            branch.replace("{card}", &card.slug()),
+            base.as_deref().unwrap_or("the repo's current branch")
+        );
+    }
     if args.start {
         dispatch_now(paths, config)?;
     }
     Ok(())
+}
+
+/// The branch a worktree should be cut from.
+///
+/// Unset means "wherever the repo is now", which is what someone queuing work
+/// from that checkout means. A named base is checked against the real branch
+/// list, because the alternative is a dispatch that dies on `invalid reference`
+/// minutes later.
+pub fn resolve_base(repo: Option<&Repo>, requested: Option<&str>) -> Result<Option<String>> {
+    let Some(repo) = repo else {
+        return Ok(requested.map(str::to_string));
+    };
+    let path = Path::new(&repo.path);
+    match requested {
+        None => Ok(crate::git::head_branch(path)),
+        Some(want) => {
+            let branches = crate::git::branches(path).unwrap_or_default();
+            if branches.is_empty() || branches.iter().any(|b| b == want) {
+                return Ok(Some(want.to_string()));
+            }
+            bail!(
+                "{:?} is not a branch of {}. Available:\n{}",
+                want,
+                repo.name,
+                branches
+                    .iter()
+                    .take(20)
+                    .map(|b| format!("  {b}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }
+    }
 }
 
 /// Take the dispatch lock and start whatever is ready.
@@ -399,6 +473,17 @@ fn indent(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
+/// Shorten to `max` characters, marking the cut.
+pub fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!(
+        "{}…",
+        s.chars().take(max.saturating_sub(1)).collect::<String>()
+    )
+}
+
 /// A compact "3m ago" for timestamps in listings.
 pub fn ago(at: i64) -> String {
     let secs = (now() - at).max(0);
@@ -495,9 +580,139 @@ fn link(paths: &Paths, args: LinkArgs) -> Result<()> {
 
 // ---- repos -----------------------------------------------------------------
 
+/// Every checkout on disk, annotated with whether the board already tracks it.
+pub struct Candidate {
+    pub found: crate::git::FoundRepo,
+    pub tracked: bool,
+}
+
+/// Find repositories, marking the ones already on the board.
+pub fn scan(store: &Store, roots: Vec<crate::git::ScanRoot>) -> Result<Vec<Candidate>> {
+    let tracked: Vec<String> = store.list_repos()?.into_iter().map(|r| r.path).collect();
+    Ok(crate::git::discover(&roots)
+        .into_iter()
+        .map(|found| Candidate {
+            tracked: tracked.iter().any(|p| Path::new(p) == found.path),
+            found,
+        })
+        .collect())
+}
+
+fn scan_repos(paths: &Paths, config: &Config, args: crate::cli::ScanArgs) -> Result<()> {
+    let store = store_of(paths)?;
+    let depth = args.depth.unwrap_or(config.scan_depth);
+    let roots = if args.paths.is_empty() {
+        config.roots()
+    } else {
+        args.paths
+            .iter()
+            .map(|p| crate::git::ScanRoot {
+                path: p.clone(),
+                depth,
+            })
+            .collect()
+    };
+
+    let mut found = scan(&store, roots)?;
+    if let Some(filter) = &args.filter {
+        let needle = filter.to_lowercase();
+        found.retain(|c| {
+            c.found.name.to_lowercase().contains(&needle)
+                || c.found
+                    .path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&needle)
+        });
+    }
+
+    if args.json {
+        let rows: Vec<serde_json::Value> = found
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.found.name,
+                    "path": c.found.path,
+                    "branch": c.found.branch,
+                    "tracked": c.tracked,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        println!("no checkouts found; try `repo scan <path>` or set scan_roots in config.toml");
+        return Ok(());
+    }
+
+    let mut added = 0;
+    for c in &found {
+        if args.add && !c.tracked {
+            overlay::sync_repo(&store, &c.found.path, &config.default_agent)?;
+            added += 1;
+        }
+        println!(
+            "{} {:<24} {:<22} {}",
+            if c.tracked || args.add { "*" } else { " " },
+            ellipsize(&c.found.name, 24),
+            ellipsize(c.found.branch.as_deref().unwrap_or("(detached)"), 22),
+            c.found.path.display()
+        );
+    }
+    println!();
+    if args.add {
+        println!("{} found, {added} newly tracked", found.len());
+    } else {
+        let tracked = found.iter().filter(|c| c.tracked).count();
+        println!(
+            "{} found, {tracked} tracked (* )  —  `repo add <name>` to track one, `repo scan --add` for all",
+            found.len()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve a repo the user named loosely: a path, a tracked name, or the name of
+/// something the scan can find.
+fn find_on_disk(store: &Store, config: &Config, needle: &str) -> Result<Option<PathBuf>> {
+    let direct = crate::config::expand_home(needle);
+    if direct.is_dir() {
+        return Ok(crate::git::root_of(&direct));
+    }
+    let lower = needle.to_lowercase();
+    let mut matches: Vec<PathBuf> = scan(store, config.roots())?
+        .into_iter()
+        .filter(|c| c.found.name.to_lowercase() == lower)
+        .map(|c| c.found.path)
+        .collect();
+    if matches.is_empty() {
+        matches = scan(store, config.roots())?
+            .into_iter()
+            .filter(|c| c.found.name.to_lowercase().contains(&lower))
+            .map(|c| c.found.path)
+            .collect();
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
+        _ => bail!(
+            "{needle:?} matches {} checkouts; name the path:\n{}",
+            matches.len(),
+            matches
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
+}
+
 fn repo(paths: &Paths, config: &Config, cmd: RepoCommand) -> Result<()> {
     let store = store_of(paths)?;
     match cmd {
+        RepoCommand::Scan(args) => scan_repos(paths, config, args),
         RepoCommand::Add {
             path,
             name,
@@ -506,8 +721,21 @@ fn repo(paths: &Paths, config: &Config, cmd: RepoCommand) -> Result<()> {
             agent,
             model,
         } => {
-            let start = path.unwrap_or_else(context_cwd);
-            let root = git_root(&start).unwrap_or(start);
+            let root = match path {
+                // An argument may be a path or just a project name.
+                Some(given) => match find_on_disk(&store, config, &given.to_string_lossy())? {
+                    Some(found) => found,
+                    None => bail!(
+                        "no checkout matches {:?}; run `repo scan` to see what is around",
+                        given.display()
+                    ),
+                },
+                // No argument: use the repo you are standing in.
+                None => match crate::git::root_of(&context_cwd()) {
+                    Some(found) => found,
+                    None => return suggest_repos(&store, config),
+                },
+            };
             let report = overlay::sync_repo(&store, &root, &config.default_agent)?;
             let mut repo = store
                 .get_repo(&report.repo_id)?
@@ -528,22 +756,54 @@ fn repo(paths: &Paths, config: &Config, cmd: RepoCommand) -> Result<()> {
                 repo.default_model = model;
             }
             let repo = store.upsert_repo(&repo)?;
+            let branch = crate::git::head_branch(Path::new(&repo.path));
             println!(
-                "{}  {}  ({} card(s) imported, {} updated)",
-                repo.name, repo.path, report.created, report.updated
+                "tracking {} on {}",
+                repo.name,
+                branch.as_deref().unwrap_or("(detached)")
             );
+            println!("  {}", repo.path);
+            if report.created + report.updated > 0 {
+                println!(
+                    "  {} card(s) imported from {}, {} updated",
+                    report.created,
+                    overlay::OVERLAY_FILE,
+                    report.updated
+                );
+            }
+            println!("\nnext: herdr-code-board add \"Title\" -p \"prompt\" --start");
             Ok(())
         }
         RepoCommand::Ls => {
             let repos = store.list_repos()?;
             if repos.is_empty() {
-                println!("no repos tracked; run `repo add` inside one");
+                return suggest_repos(&store, config);
             }
+            let cards = store.list_cards()?;
+            println!(
+                "{:<18} {:<20} {:>3} {:>5} {:<18} PATH",
+                "REPO", "BRANCH", "PAR", "CARDS", "TAGS"
+            );
             for r in repos {
+                let mine = cards.iter().filter(|c| c.repo_id.as_ref() == Some(&r.id));
+                let total = mine.clone().count();
+                let live = mine.filter(|c| c.column.is_live()).count();
+                // Long branch names are common; keep the columns lined up.
+                let branch = ellipsize(
+                    &crate::git::head_branch(Path::new(&r.path))
+                        .unwrap_or_else(|| "(detached)".into()),
+                    20,
+                );
                 println!(
-                    "{:<16} {:<3} {:<28} {}",
+                    "{:<18} {:<20} {:>3} {:>5} {:<18} {}",
                     r.name,
+                    branch,
                     r.max_parallel,
+                    if live > 0 {
+                        format!("{total}/{live}")
+                    } else {
+                        total.to_string()
+                    },
                     r.tags.join(","),
                     r.path
                 );
@@ -559,6 +819,33 @@ fn repo(paths: &Paths, config: &Config, cmd: RepoCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Nothing tracked and nowhere obvious to start: show what is on disk rather
+/// than an error telling the user to go find it themselves.
+fn suggest_repos(store: &Store, config: &Config) -> Result<()> {
+    let found = scan(store, config.roots())?;
+    if found.is_empty() {
+        println!("no checkouts found under your home directory.");
+        println!("point it somewhere: herdr-code-board repo scan ~/where/your/code/is");
+        return Ok(());
+    }
+    println!("not inside a repository. {} found nearby:\n", found.len());
+    for c in found.iter().take(15) {
+        println!(
+            "{} {:<24} {:<20} {}",
+            if c.tracked { "*" } else { " " },
+            ellipsize(&c.found.name, 24),
+            ellipsize(c.found.branch.as_deref().unwrap_or("(detached)"), 20),
+            c.found.path.display()
+        );
+    }
+    if found.len() > 15 {
+        println!("  … and {} more", found.len() - 15);
+    }
+    println!("\ntrack one:  herdr-code-board repo add <name>");
+    println!("track all:  herdr-code-board repo scan --add");
+    Ok(())
 }
 
 fn sync(paths: &Paths, config: &Config, which: Vec<PathBuf>) -> Result<()> {
@@ -694,6 +981,13 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ellipsize_keeps_columns_aligned() {
+        assert_eq!(ellipsize("main", 10), "main");
+        assert_eq!(ellipsize("feature/syntax-highlight", 10), "feature/s…");
+        assert_eq!(ellipsize("exactlyten", 10), "exactlyten");
+    }
 
     #[test]
     fn ago_reads_like_a_human_wrote_it() {

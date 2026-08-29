@@ -4,10 +4,12 @@
 //! presses into [`Request`]s that the run loop executes, which keeps every
 //! keybinding testable.
 
+use std::path::PathBuf;
+
 use crate::model::{Card, Column, Repo};
 use crate::store::cards::NewCard;
 
-use super::form::Form;
+use super::form::{Field, Form};
 
 /// Work the run loop must do on the app's behalf.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,13 +18,106 @@ pub enum Request {
     Quit,
     Reload,
     Sync,
-    SetLane { card_id: String, lane: Column },
-    Cancel { card_id: String },
-    Retry { card_id: String },
-    Delete { card_id: String },
-    FocusPane { pane_id: String },
+    SetLane {
+        card_id: String,
+        lane: Column,
+    },
+    Cancel {
+        card_id: String,
+    },
+    Retry {
+        card_id: String,
+    },
+    Delete {
+        card_id: String,
+    },
+    FocusPane {
+        pane_id: String,
+    },
     Create(Box<NewCard>),
     Update(Box<Card>),
+    /// Scan the disk and hand the results back through [`App::open_picker`].
+    /// The app cannot do it itself: it performs no I/O.
+    ScanRepos(PickerTarget),
+    /// Track this checkout if it is not tracked, then apply it to `target`.
+    UseRepo {
+        path: PathBuf,
+        target: PickerTarget,
+    },
+    /// The form needs this repo's branches for its `from` chooser.
+    LoadBranches(PathBuf),
+}
+
+/// What the repo picker is being opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerTarget {
+    /// Set the board's repo filter.
+    Filter,
+    /// Set the repo of the card being written.
+    Form,
+}
+
+/// One row of the repo picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoChoice {
+    pub name: String,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub tracked: bool,
+}
+
+/// A searchable list of checkouts found on disk.
+#[derive(Debug, Clone)]
+pub struct Picker {
+    pub items: Vec<RepoChoice>,
+    pub query: String,
+    pub cursor: usize,
+    pub target: PickerTarget,
+}
+
+impl Picker {
+    pub fn new(items: Vec<RepoChoice>, target: PickerTarget) -> Self {
+        Self {
+            items,
+            query: String::new(),
+            cursor: 0,
+            target,
+        }
+    }
+
+    /// Subsequence match, so `hcb` finds `herdr-code-board`.
+    fn fuzzy(haystack: &str, needle: &str) -> bool {
+        let mut chars = haystack.chars().flat_map(char::to_lowercase);
+        needle
+            .chars()
+            .flat_map(char::to_lowercase)
+            .all(|want| chars.any(|c| c == want))
+    }
+
+    pub fn matches(&self) -> Vec<&RepoChoice> {
+        if self.query.is_empty() {
+            return self.items.iter().collect();
+        }
+        self.items
+            .iter()
+            .filter(|i| {
+                Self::fuzzy(&i.name, &self.query)
+                    || i.path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&self.query.to_lowercase())
+            })
+            .collect()
+    }
+
+    pub fn selected(&self) -> Option<&RepoChoice> {
+        self.matches().get(self.cursor).copied()
+    }
+
+    fn clamp(&mut self) {
+        let len = self.matches().len();
+        self.cursor = self.cursor.min(len.saturating_sub(1));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +126,8 @@ pub enum Mode {
     Search,
     Help,
     Form,
+    /// Choosing a repository from what is on disk.
+    RepoPicker,
     /// A yes/no gate in front of something destructive.
     Confirm(String),
 }
@@ -57,6 +154,9 @@ pub struct App {
     pub default_agent: String,
     pub mode: Mode,
     pub form: Option<Form>,
+    pub picker: Option<Picker>,
+    /// Set while a scan is in flight, so the board can say so.
+    pub scanning: bool,
     /// Selected lane, as an index into [`Column::ALL`].
     pub lane: usize,
     /// Selected card within each lane.
@@ -78,6 +178,8 @@ impl App {
             default_agent,
             mode: Mode::Normal,
             form: None,
+            picker: None,
+            scanning: false,
             lane: 0,
             cursor: [0; Column::ALL.len()],
             search: String::new(),
@@ -96,6 +198,25 @@ impl App {
             }
         }
         self.clamp();
+    }
+
+    /// Show the picker with freshly scanned results.
+    pub fn open_picker(&mut self, items: Vec<RepoChoice>, target: PickerTarget) {
+        self.scanning = false;
+        self.status.clear();
+        if items.is_empty() {
+            self.status = "no checkouts found; set scan_roots in config.toml".into();
+            return;
+        }
+        self.picker = Some(Picker::new(items, target));
+        self.mode = Mode::RepoPicker;
+    }
+
+    /// Give the form its `from` choices once the run loop has read them.
+    pub fn set_branches(&mut self, branches: Vec<String>) {
+        if let Some(form) = self.form.as_mut() {
+            form.set_bases(branches);
+        }
     }
 
     fn matches(&self, card: &Card) -> bool {
@@ -204,6 +325,7 @@ impl App {
             }
             Mode::Confirm(_) => self.key_confirm(key),
             Mode::Form => self.key_form(key),
+            Mode::RepoPicker => self.key_picker(key),
         }
     }
 
@@ -278,19 +400,30 @@ impl App {
                 None => Request::None,
             },
             Key::Char('n') => {
-                self.form = Some(Form::new(
-                    &self.repos,
-                    self.agents.clone(),
-                    &self.default_agent,
-                ));
+                let mut form = Form::new(&self.repos, self.agents.clone(), &self.default_agent);
+                // Standing in a repo, or filtered to one? That is the one you mean.
+                if let Some(i) = self.repo_filter {
+                    if let Some(repo) = self.repos.get(i) {
+                        if let Some(idx) = form.repos.iter().position(|(_, id)| *id == repo.id) {
+                            form.repo = idx;
+                        }
+                    }
+                }
+                self.form = Some(form);
                 self.mode = Mode::Form;
-                Request::None
+                // Nothing tracked yet: go straight to picking a repo instead of
+                // presenting a form whose repo field has nothing in it.
+                if self.repos.is_empty() {
+                    self.scanning = true;
+                    return Request::ScanRepos(PickerTarget::Form);
+                }
+                self.form_branch_request()
             }
             Key::Char('e') => match self.selected() {
                 Some(card) => {
                     self.form = Some(Form::edit(card, &self.repos, self.agents.clone()));
                     self.mode = Mode::Form;
-                    Request::None
+                    self.form_branch_request()
                 }
                 None => Request::None,
             },
@@ -308,6 +441,11 @@ impl App {
                 };
                 self.clamp();
                 Request::None
+            }
+            Key::Char('t') => {
+                self.scanning = true;
+                self.status = "scanning for repositories…".into();
+                Request::ScanRepos(PickerTarget::Filter)
             }
             Key::Char('s') => Request::Sync,
             Key::Char('R') => Request::Reload,
@@ -334,6 +472,107 @@ impl App {
         }
         self.clamp();
         Request::None
+    }
+
+    fn key_picker(&mut self, key: Key) -> Request {
+        let Some(picker) = self.picker.as_mut() else {
+            self.mode = Mode::Normal;
+            return Request::None;
+        };
+        match key {
+            Key::Esc => {
+                self.picker = None;
+                // Cancelling out of the form's picker returns to the form.
+                self.mode = if self.form.is_some() {
+                    Mode::Form
+                } else {
+                    Mode::Normal
+                };
+                Request::None
+            }
+            Key::Down | Key::Tab => {
+                let len = picker.matches().len();
+                if len > 0 {
+                    picker.cursor = (picker.cursor + 1) % len;
+                }
+                Request::None
+            }
+            Key::Up | Key::BackTab => {
+                let len = picker.matches().len();
+                if len > 0 {
+                    picker.cursor = (picker.cursor + len - 1) % len;
+                }
+                Request::None
+            }
+            Key::Backspace => {
+                picker.query.pop();
+                picker.clamp();
+                Request::None
+            }
+            Key::Char(c) => {
+                picker.query.push(c);
+                picker.cursor = 0;
+                Request::None
+            }
+            Key::Enter => match picker.selected().cloned() {
+                Some(choice) => {
+                    let target = picker.target;
+                    self.picker = None;
+                    self.mode = if target == PickerTarget::Form {
+                        Mode::Form
+                    } else {
+                        Mode::Normal
+                    };
+                    Request::UseRepo {
+                        path: choice.path,
+                        target,
+                    }
+                }
+                None => Request::None,
+            },
+            _ => Request::None,
+        }
+    }
+
+    /// Ask the run loop for the branches of whichever repo the form is on, so the
+    /// `from` chooser is populated before the user reaches it.
+    fn form_branch_request(&self) -> Request {
+        let Some(form) = self.form.as_ref() else {
+            return Request::None;
+        };
+        let Some(id) = form.repo_id() else {
+            return Request::None;
+        };
+        match self.repos.iter().find(|r| r.id == id) {
+            Some(repo) => Request::LoadBranches(PathBuf::from(&repo.path)),
+            None => Request::None,
+        }
+    }
+
+    /// Point the board's filter at a repo, by path.
+    pub fn filter_by_path(&mut self, path: &std::path::Path) {
+        self.repo_filter = self
+            .repos
+            .iter()
+            .position(|r| std::path::Path::new(&r.path) == path);
+        self.clamp();
+    }
+
+    /// Point the form at a repo, by path.
+    pub fn form_repo_by_path(&mut self, path: &std::path::Path) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        let id = self
+            .repos
+            .iter()
+            .find(|r| std::path::Path::new(&r.path) == path)
+            .map(|r| r.id.clone());
+        if let Some(id) = id {
+            if let Some(idx) = form.repos.iter().position(|(_, rid)| *rid == id) {
+                form.repo = idx;
+            }
+        }
     }
 
     fn key_confirm(&mut self, key: Key) -> Request {
@@ -388,6 +627,10 @@ impl App {
             Key::Char(c) => {
                 form.push(c);
                 Request::None
+            }
+            Key::Enter if form.current() == Field::Repo => {
+                self.scanning = true;
+                Request::ScanRepos(PickerTarget::Form)
             }
             Key::Enter => {
                 let form = self.form.take().expect("form present");
@@ -653,6 +896,172 @@ mod tests {
             "the form must not vanish with the input"
         );
         assert!(a.status.contains("title"));
+    }
+
+    fn choice(name: &str, path: &str, tracked: bool) -> RepoChoice {
+        RepoChoice {
+            name: name.into(),
+            path: PathBuf::from(path),
+            branch: Some("main".into()),
+            tracked,
+        }
+    }
+
+    #[test]
+    fn t_asks_for_a_scan_rather_than_blocking_on_one() {
+        let mut a = app();
+        assert_eq!(
+            a.on_key(Key::Char('t')),
+            Request::ScanRepos(PickerTarget::Filter)
+        );
+        assert!(a.scanning, "the board should say it is working");
+        assert_eq!(a.mode, Mode::Normal, "the picker opens when results arrive");
+    }
+
+    #[test]
+    fn the_picker_filters_by_fuzzy_subsequence() {
+        let mut a = app();
+        a.open_picker(
+            vec![
+                choice("herdr-code-board", "/h/Documents/herdr-code-board", false),
+                choice("rustock", "/h/Documents/rustock", true),
+            ],
+            PickerTarget::Filter,
+        );
+        assert_eq!(a.mode, Mode::RepoPicker);
+
+        for c in "hcb".chars() {
+            a.on_key(Key::Char(c));
+        }
+        let picker = a.picker.as_ref().unwrap();
+        assert_eq!(picker.matches().len(), 1);
+        assert_eq!(picker.matches()[0].name, "herdr-code-board");
+    }
+
+    #[test]
+    fn the_picker_also_matches_on_path() {
+        let mut a = app();
+        a.open_picker(
+            vec![
+                choice("alpha", "/h/work/alpha", false),
+                choice("beta", "/h/play/beta", false),
+            ],
+            PickerTarget::Filter,
+        );
+        for c in "work".chars() {
+            a.on_key(Key::Char(c));
+        }
+        assert_eq!(a.picker.as_ref().unwrap().matches().len(), 1);
+    }
+
+    #[test]
+    fn picking_a_repo_asks_the_loop_to_track_and_apply_it() {
+        let mut a = app();
+        a.open_picker(
+            vec![choice("alpha", "/h/work/alpha", false)],
+            PickerTarget::Filter,
+        );
+        assert_eq!(
+            a.on_key(Key::Enter),
+            Request::UseRepo {
+                path: PathBuf::from("/h/work/alpha"),
+                target: PickerTarget::Filter
+            }
+        );
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(a.picker.is_none());
+    }
+
+    #[test]
+    fn escaping_the_pickers_returns_to_wherever_you_came_from() {
+        // Opened from the board.
+        let mut a = app();
+        a.open_picker(vec![choice("a", "/a", false)], PickerTarget::Filter);
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Normal);
+
+        // Opened from the form: the form is still there behind it.
+        let mut a = app();
+        a.on_key(Key::Char('n'));
+        a.open_picker(vec![choice("a", "/a", false)], PickerTarget::Form);
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Form);
+        assert!(a.form.is_some());
+    }
+
+    #[test]
+    fn an_empty_scan_says_so_instead_of_opening_a_blank_list() {
+        let mut a = app();
+        a.scanning = true;
+        a.open_picker(vec![], PickerTarget::Filter);
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(!a.scanning);
+        assert!(a.status.contains("no checkouts"));
+    }
+
+    #[test]
+    fn a_new_card_starts_in_whichever_repo_you_are_filtered_to() {
+        let mut a = app();
+        let repo = Repo {
+            id: "R1".into(),
+            name: "erp".into(),
+            path: "/erp".into(),
+            tags: vec![],
+            max_parallel: 2,
+            default_agent: None,
+            default_model: None,
+        };
+        a.load(vec![], vec![repo]);
+        a.on_key(Key::Tab); // filter to erp
+        a.on_key(Key::Char('n'));
+
+        assert_eq!(a.form.as_ref().unwrap().repo_id().as_deref(), Some("R1"));
+    }
+
+    #[test]
+    fn a_new_card_with_nothing_tracked_goes_straight_to_the_picker() {
+        let mut a = app();
+        a.load(vec![], vec![]);
+        assert_eq!(
+            a.on_key(Key::Char('n')),
+            Request::ScanRepos(PickerTarget::Form)
+        );
+        assert!(a.form.is_some(), "the form is waiting behind the picker");
+    }
+
+    #[test]
+    fn opening_the_form_on_a_repo_asks_for_its_branches() {
+        let mut a = app();
+        let repo = Repo {
+            id: "R1".into(),
+            name: "erp".into(),
+            path: "/erp".into(),
+            tags: vec![],
+            max_parallel: 2,
+            default_agent: None,
+            default_model: None,
+        };
+        a.load(vec![], vec![repo]);
+        a.on_key(Key::Tab);
+        assert_eq!(
+            a.on_key(Key::Char('n')),
+            Request::LoadBranches(PathBuf::from("/erp"))
+        );
+        a.set_branches(vec!["main".into(), "develop".into()]);
+        assert_eq!(a.form.as_ref().unwrap().base_name(), Some("main"));
+    }
+
+    #[test]
+    fn enter_on_the_form_repo_field_opens_the_picker_instead_of_saving() {
+        let mut a = app();
+        a.on_key(Key::Char('n'));
+        let idx = {
+            let f = a.form.as_ref().unwrap();
+            f.fields().iter().position(|x| *x == Field::Repo).unwrap()
+        };
+        a.form.as_mut().unwrap().field = idx;
+        assert_eq!(a.on_key(Key::Enter), Request::ScanRepos(PickerTarget::Form));
+        assert!(a.form.is_some(), "the half-written card is not thrown away");
     }
 
     #[test]

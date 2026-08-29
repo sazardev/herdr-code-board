@@ -59,10 +59,65 @@ event hooks read and write the same board.
 Then, from inside a repo:
 
 ```sh
-herdr-code-board repo add
-herdr-code-board add "Review the diff" --prompt "Review the current diff and report only actionable findings." --start
+herdr-code-board add "Review the diff" -p "Review the current diff and report only actionable findings." --start
 herdr-code-board open
 ```
+
+That is the whole setup. The card attaches to whatever repository you are
+standing in, tracking it on the board the first time — you do not have to
+register anything first.
+
+## Repositories
+
+The board finds your checkouts rather than asking you to type paths. It walks
+your home directory (and `~/.config`, where editor and dotfile repos live),
+skipping `node_modules`, build output and hidden directories, and lists what it
+finds newest-first — 58 repos in about 90 ms here.
+
+```sh
+herdr-code-board repo scan            # what is out there, and what is tracked
+herdr-code-board repo scan --add      # track all of it
+herdr-code-board repo add             # track the repo you are standing in
+herdr-code-board repo add shiki       # or one by name, wherever it lives
+herdr-code-board repo ls              # tracked repos, branch, cards, concurrency
+```
+
+In the board, **`t`** opens the picker: every checkout on disk, with its current
+branch, `●` for tracked and `○` for not. Type to filter — it is a subsequence
+match, so `hcb` finds `herdr-code-board`. Enter tracks it and filters the board
+to it. The same picker opens from the repo field of the new-card form, and a new
+card starts in whichever repo you are already filtered to.
+
+Point it elsewhere in `config.toml` if your code does not live under `$HOME`:
+
+```toml
+scan_roots = ["~/work", "/srv/checkouts"]
+scan_depth = 4
+```
+
+## Branches
+
+A `worktree` card cuts a branch, so it needs to know from where. Leave it alone
+and it branches from wherever the repo is right now — which is what you mean
+when you queue work from a checkout you are looking at:
+
+```sh
+herdr-code-board add "Risky refactor" --placement worktree --start
+#   worktree board/risky-refactor-cm9735 from main
+```
+
+Name a base and it is checked against the repo's real branches before the card
+is created, rather than failing at dispatch time:
+
+```sh
+$ herdr-code-board add "x" --placement worktree --base nosuch
+Error: "nosuch" is not a branch of oxid. Available:
+  main
+  fix/scale-to-zero-and-deploy-visibility
+```
+
+In the form, `placement = worktree` reveals a **branch** field and a **from**
+chooser listing that repo's actual branches, most recently committed first.
 
 ## The board
 
@@ -84,11 +139,12 @@ By default a card completes when its agent's turn ends. Pass `--review` (or
 ```
 h l ← →   lanes                 n   new card
 j k ↑ ↓   cards                 e   edit
-g G       first / last          x   cancel and release the pane
-H L       shift a lane over     r   re-dispatch from scratch
-space     queue / unqueue       d   delete (asks first)
-enter     jump to the pane      /   search      tab  repo filter
-s         re-import overlays    R   reload      ?    help      q  quit
+g G       first / last          t   pick a repository (scans your disk)
+H L       shift a lane over     x   cancel and release the pane
+space     queue / unqueue       r   re-dispatch from scratch
+enter     jump to the pane      d   delete (asks first)
+/         search                tab cycle the repo filter
+s         re-import overlays    R   reload      ?   help      q  quit
 ```
 
 ## Placement
@@ -103,10 +159,8 @@ Where a card's agent runs:
 | `workspace` | a fresh workspace rooted at the repo |
 | `worktree` | `herdr worktree create`, which herdr opens as its own workspace |
 
-```sh
-herdr-code-board add "Try the risky refactor" \
-  --placement worktree --branch board/refactor --base main --start
-```
+`--branch` names the branch (`{card}` expands to the card slug) and `--base`
+what to cut it from; see [Branches](#branches).
 
 Split direction follows herdr's own geometry rule: wide panes split right, tall
 panes split down. Override with `--direction right|down` and `--ratio`.

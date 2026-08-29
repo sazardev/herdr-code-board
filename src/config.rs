@@ -78,6 +78,17 @@ impl Paths {
     }
 }
 
+/// Expand a leading `~`, because people write scan roots by hand.
+pub fn expand_home(raw: &str) -> PathBuf {
+    let Some(rest) = raw.strip_prefix('~') else {
+        return PathBuf::from(raw);
+    };
+    let Some(home) = env::var_os("HOME") else {
+        return PathBuf::from(raw);
+    };
+    PathBuf::from(home).join(rest.trim_start_matches('/'))
+}
+
 /// This plugin's id, as declared in `herdr-plugin.toml`. Herdr names its
 /// per-plugin directories after it.
 pub const PLUGIN_ID: &str = "herdr-code-board";
@@ -137,6 +148,11 @@ pub struct Config {
     pub default_max_parallel: u32,
     /// Seconds between engine sweeps when nothing else wakes it.
     pub engine_tick_seconds: u64,
+    /// Where to look for repositories. Empty means "your home directory, plus
+    /// ~/.config for editor and dotfile checkouts".
+    pub scan_roots: Vec<String>,
+    /// How many directory levels down to look. 4 covers `~/src/org/project`.
+    pub scan_depth: usize,
     /// TUI redraw poll, in milliseconds.
     pub tui_poll_ms: u64,
     /// Desktop/herdr notifications on rule fires and failures.
@@ -201,6 +217,8 @@ impl Default for Config {
             default_agent: "claude".into(),
             default_max_parallel: 2,
             engine_tick_seconds: 30,
+            scan_roots: Vec::new(),
+            scan_depth: 4,
             tui_poll_ms: 250,
             notifications: true,
             model_flags: crate::agents::default_model_flags(),
@@ -210,6 +228,23 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The places [`crate::git::discover`] should look, honouring `scan_roots`.
+    pub fn roots(&self) -> Vec<crate::git::ScanRoot> {
+        if self.scan_roots.is_empty() {
+            let home = env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            return crate::git::default_roots(&home, self.scan_depth);
+        }
+        self.scan_roots
+            .iter()
+            .map(|r| crate::git::ScanRoot {
+                path: expand_home(r),
+                depth: self.scan_depth,
+            })
+            .collect()
+    }
+
     pub fn load(paths: &Paths) -> Result<Self> {
         let file = paths.config_file();
         if !file.exists() {
@@ -240,6 +275,31 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leading_tilde_is_expanded() {
+        let home = env::var("HOME").unwrap();
+        assert_eq!(expand_home("~/src"), PathBuf::from(&home).join("src"));
+        assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_home("relative"), PathBuf::from("relative"));
+    }
+
+    #[test]
+    fn scan_roots_default_to_home_and_are_overridable() {
+        let auto = Config::default().roots();
+        assert!(!auto.is_empty());
+        assert_eq!(auto[0].depth, 4);
+
+        let custom = Config {
+            scan_roots: vec!["~/work".into(), "/opt/src".into()],
+            scan_depth: 2,
+            ..Config::default()
+        };
+        let roots = custom.roots();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[1].path, PathBuf::from("/opt/src"));
+        assert!(roots.iter().all(|r| r.depth == 2));
+    }
 
     #[test]
     fn model_flag_renders_both_shapes() {

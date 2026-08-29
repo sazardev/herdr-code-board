@@ -124,6 +124,19 @@ Verified against herdr 0.8.2:
 - Claude Code's folder-trust dialog is an arrow list with no numbered shortcuts,
   which is why `Answer` navigates instead of typing a digit.
 
+## Repository discovery
+
+`src/git.rs` walks the filesystem itself rather than shelling out per directory:
+`.git/HEAD` is one small read per repo, which is why a 58-repo home directory
+scans in ~90 ms. Only `branches()` runs git, and only for one repo the user has
+already chosen. Keep it that way — a scan happens on every press of `t`.
+
+The `App` performs no I/O, so the picker is a two-step dance: `on_key` returns
+`Request::ScanRepos(target)`, the run loop scans and calls `App::open_picker`
+with the results. Same for branches (`Request::LoadBranches` → `set_branches`).
+Do not reach for the filesystem from inside `state.rs`; the key handling tests
+depend on it staying pure.
+
 ## Paths
 
 There is one board per user. Herdr injects `HERDR_PLUGIN_CONFIG_DIR` and

@@ -14,24 +14,16 @@ pub enum Field {
     Agent,
     Model,
     Placement,
+    /// Worktree only: the branch to cut.
+    Branch,
+    /// Worktree only: what to cut it from.
+    Base,
     Tags,
     Args,
     Flags,
 }
 
 impl Field {
-    pub const ALL: [Field; 9] = [
-        Field::Title,
-        Field::Prompt,
-        Field::Repo,
-        Field::Agent,
-        Field::Model,
-        Field::Placement,
-        Field::Tags,
-        Field::Args,
-        Field::Flags,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             Field::Title => "title",
@@ -40,6 +32,8 @@ impl Field {
             Field::Agent => "agent",
             Field::Model => "model",
             Field::Placement => "placement",
+            Field::Branch => "branch",
+            Field::Base => "from",
             Field::Tags => "tags",
             Field::Args => "args",
             Field::Flags => "flags",
@@ -50,7 +44,7 @@ impl Field {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            Field::Title | Field::Prompt | Field::Model | Field::Tags | Field::Args
+            Field::Title | Field::Prompt | Field::Model | Field::Tags | Field::Args | Field::Branch
         )
     }
 }
@@ -91,6 +85,13 @@ pub struct Form {
     pub repo: usize,
     pub agent: usize,
     pub placement: usize,
+    /// Branch to cut, for a worktree card. `{card}` expands to the card slug.
+    pub branch: String,
+    /// Index into `bases`, the repo's real branches.
+    pub base: usize,
+    /// The chosen repo's branches, newest first. Filled in by the run loop,
+    /// because the form itself does no I/O.
+    pub bases: Vec<String>,
     pub flag: usize,
     pub start: bool,
     pub review: bool,
@@ -116,6 +117,9 @@ impl Form {
             repo: 0,
             agent,
             placement: 0,
+            branch: "board/{card}".to_string(),
+            base: 0,
+            bases: Vec::new(),
             flag: 0,
             start: true,
             review: false,
@@ -147,22 +151,63 @@ impl Form {
             .iter()
             .position(|p| *p == placement_name(&card.placement))
             .unwrap_or(0);
+        if let Placement::Worktree { branch, base } = &card.placement {
+            form.branch = branch.clone();
+            if let Some(b) = base {
+                form.bases = vec![b.clone()];
+            }
+        }
         form.start = false;
         form.review = !card.auto_complete;
         form.auto_answer = card.auto_answer;
         form
     }
 
+    /// The fields on screen right now. Branch and base only exist for a worktree
+    /// card, because for any other placement they would be dead controls.
+    pub fn fields(&self) -> Vec<Field> {
+        let mut out = vec![
+            Field::Title,
+            Field::Prompt,
+            Field::Repo,
+            Field::Agent,
+            Field::Model,
+            Field::Placement,
+        ];
+        if self.placement_name() == "worktree" {
+            out.push(Field::Branch);
+            out.push(Field::Base);
+        }
+        out.extend([Field::Tags, Field::Args, Field::Flags]);
+        out
+    }
+
     pub fn current(&self) -> Field {
-        Field::ALL[self.field.min(Field::ALL.len() - 1)]
+        let fields = self.fields();
+        fields[self.field.min(fields.len() - 1)]
     }
 
     pub fn next_field(&mut self) {
-        self.field = (self.field + 1) % Field::ALL.len();
+        let len = self.fields().len();
+        self.field = (self.field + 1) % len;
     }
 
     pub fn prev_field(&mut self) {
-        self.field = (self.field + Field::ALL.len() - 1) % Field::ALL.len();
+        let len = self.fields().len();
+        self.field = (self.field + len - 1) % len;
+    }
+
+    /// Offer these as the `from` choices, keeping the current pick if it survives.
+    pub fn set_bases(&mut self, bases: Vec<String>) {
+        let keep = self.bases.get(self.base).cloned();
+        self.bases = bases;
+        self.base = keep
+            .and_then(|b| self.bases.iter().position(|x| *x == b))
+            .unwrap_or(0);
+    }
+
+    pub fn base_name(&self) -> Option<&str> {
+        self.bases.get(self.base).map(String::as_str)
     }
 
     pub fn push(&mut self, ch: char) {
@@ -172,6 +217,7 @@ impl Form {
             Field::Model => self.model.push(ch),
             Field::Tags => self.tags.push(ch),
             Field::Args => self.args.push(ch),
+            Field::Branch => self.branch.push(ch),
             _ => {}
         }
     }
@@ -183,6 +229,7 @@ impl Form {
             Field::Model => self.model.pop(),
             Field::Tags => self.tags.pop(),
             Field::Args => self.args.pop(),
+            Field::Branch => self.branch.pop(),
             _ => None,
         };
     }
@@ -201,7 +248,12 @@ impl Form {
         match self.current() {
             Field::Repo => self.repo = step(self.repo, self.repos.len()),
             Field::Agent => self.agent = step(self.agent, self.agents.len()),
-            Field::Placement => self.placement = step(self.placement, PLACEMENTS.len()),
+            Field::Placement => {
+                self.placement = step(self.placement, PLACEMENTS.len());
+                // The field list just changed shape; keep the cursor in range.
+                self.field = self.field.min(self.fields().len() - 1);
+            }
+            Field::Base => self.base = step(self.base, self.bases.len()),
             Field::Flags => self.flag = step(self.flag, Flag::ALL.len()),
             _ => {}
         }
@@ -250,8 +302,12 @@ impl Form {
             "tab" => Placement::NewTab,
             "workspace" => Placement::NewWorkspace,
             "worktree" => Placement::Worktree {
-                branch: "board/{card}".into(),
-                base: None,
+                branch: if self.branch.trim().is_empty() {
+                    "board/{card}".into()
+                } else {
+                    self.branch.trim().to_string()
+                },
+                base: self.base_name().map(str::to_string),
             },
             _ => Placement::Split {
                 direction: None,
@@ -386,7 +442,7 @@ mod tests {
         assert_eq!(f.title, "hi");
 
         // Move to the agent field, which is a chooser, not a text box.
-        f.field = Field::ALL.iter().position(|x| *x == Field::Agent).unwrap();
+        f.field = f.fields().iter().position(|x| *x == Field::Agent).unwrap();
         f.push('z');
         assert_eq!(f.agent_kind(), "codex", "typing must not corrupt a chooser");
     }
@@ -394,7 +450,7 @@ mod tests {
     #[test]
     fn choosers_wrap_in_both_directions() {
         let mut f = form();
-        f.field = Field::ALL.iter().position(|x| *x == Field::Agent).unwrap();
+        f.field = f.fields().iter().position(|x| *x == Field::Agent).unwrap();
         f.cycle(true);
         assert_eq!(f.agent_kind(), "claude");
         f.cycle(false);
@@ -406,7 +462,7 @@ mod tests {
     #[test]
     fn flags_toggle_independently() {
         let mut f = form();
-        f.field = Field::ALL.iter().position(|x| *x == Field::Flags).unwrap();
+        f.field = f.fields().iter().position(|x| *x == Field::Flags).unwrap();
         assert!(f.start);
         f.toggle();
         assert!(!f.start);
@@ -414,6 +470,84 @@ mod tests {
         f.toggle();
         assert!(f.review);
         assert!(!f.auto_answer);
+    }
+
+    #[test]
+    fn branch_and_base_appear_only_for_a_worktree_card() {
+        let mut f = form();
+        assert!(!f.fields().contains(&Field::Branch));
+        assert!(!f.fields().contains(&Field::Base));
+
+        f.placement = PLACEMENTS.iter().position(|p| *p == "worktree").unwrap();
+        assert!(f.fields().contains(&Field::Branch));
+        assert!(f.fields().contains(&Field::Base));
+    }
+
+    #[test]
+    fn shrinking_the_field_list_does_not_strand_the_cursor() {
+        let mut f = form();
+        f.placement = PLACEMENTS.iter().position(|p| *p == "worktree").unwrap();
+        f.field = f.fields().len() - 1;
+        let last = f.current();
+
+        // Cycle the placement away from worktree: two fields vanish underneath.
+        f.field = f
+            .fields()
+            .iter()
+            .position(|x| *x == Field::Placement)
+            .unwrap();
+        f.cycle(true);
+        assert!(f.field < f.fields().len());
+        let _ = last;
+    }
+
+    #[test]
+    fn the_base_chooser_keeps_your_pick_when_the_branch_list_is_reloaded() {
+        let mut f = form();
+        f.set_bases(vec!["main".into(), "develop".into(), "old".into()]);
+        f.placement = PLACEMENTS.iter().position(|p| *p == "worktree").unwrap();
+        f.field = f.fields().iter().position(|x| *x == Field::Base).unwrap();
+        f.cycle(true);
+        assert_eq!(f.base_name(), Some("develop"));
+
+        // A rescan reorders the branches; the chosen one must still be chosen.
+        f.set_bases(vec!["develop".into(), "main".into()]);
+        assert_eq!(f.base_name(), Some("develop"));
+
+        // And a branch that disappeared falls back to the first.
+        f.set_bases(vec!["main".into()]);
+        assert_eq!(f.base_name(), Some("main"));
+    }
+
+    #[test]
+    fn a_worktree_card_carries_its_branch_and_base() {
+        let mut f = form();
+        f.title = "t".into();
+        f.placement = PLACEMENTS.iter().position(|p| *p == "worktree").unwrap();
+        f.branch = "board/try".into();
+        f.set_bases(vec!["develop".into()]);
+        assert_eq!(
+            f.to_new_card().unwrap().placement,
+            Placement::Worktree {
+                branch: "board/try".into(),
+                base: Some("develop".into())
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_branch_falls_back_to_the_default_pattern() {
+        let mut f = form();
+        f.title = "t".into();
+        f.placement = PLACEMENTS.iter().position(|p| *p == "worktree").unwrap();
+        f.branch = "   ".into();
+        assert_eq!(
+            f.to_new_card().unwrap().placement,
+            Placement::Worktree {
+                branch: "board/{card}".into(),
+                base: None
+            }
+        );
     }
 
     #[test]

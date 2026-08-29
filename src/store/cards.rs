@@ -360,6 +360,40 @@ impl Store {
         Ok(attempts as u32)
     }
 
+    /// Move a card up or down within its lane.
+    ///
+    /// Lanes are ordered by `priority DESC, created_at`, which means priority is
+    /// only ever compared between neighbours. So rather than invent a scale, the
+    /// whole lane is renumbered from the reordered list — a handful of rows, and
+    /// the result is always exactly the order shown.
+    pub fn reorder_in_lane(&mut self, card_id: &str, delta: i64) -> Result<bool> {
+        let Some(card) = self.get_card(card_id)? else {
+            return Ok(false);
+        };
+        let mut lane = self.cards_in(card.column)?;
+        let Some(from) = lane.iter().position(|c| c.id == card_id) else {
+            return Ok(false);
+        };
+        let to = (from as i64 + delta).clamp(0, lane.len() as i64 - 1) as usize;
+        if to == from {
+            return Ok(false);
+        }
+        let moved = lane.remove(from);
+        lane.insert(to, moved);
+
+        let top = lane.len() as i64;
+        self.transaction(|tx| {
+            for (i, c) in lane.iter().enumerate() {
+                tx.execute(
+                    "UPDATE cards SET priority = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![c.id, top - i as i64, now()],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
     pub fn delete_card(&self, id: &str) -> Result<bool> {
         let n = self
             .conn()
@@ -483,6 +517,55 @@ mod tests {
         assert_eq!(back.binding.pane_id.as_deref(), Some("w2:p1"));
         assert_eq!(back.last_error.as_deref(), Some("boom"));
         assert!(back.auto_answer);
+    }
+
+    #[test]
+    fn reordering_moves_a_card_within_its_lane_and_nowhere_else() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ids: Vec<String> = ["a", "b", "c"].iter().map(|t| seed(&store, t).id).collect();
+        let order = |s: &Store| {
+            s.cards_in(Column::Backlog)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&store), ["a", "b", "c"]);
+
+        assert!(store.reorder_in_lane(&ids[2], -1).unwrap());
+        assert_eq!(order(&store), ["a", "c", "b"]);
+
+        assert!(store.reorder_in_lane(&ids[2], -1).unwrap());
+        assert_eq!(order(&store), ["c", "a", "b"]);
+
+        // Already at the top: nothing to do, and it says so.
+        assert!(!store.reorder_in_lane(&ids[2], -1).unwrap());
+        assert_eq!(order(&store), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reordering_leaves_other_lanes_untouched() {
+        let mut store = Store::open_in_memory().unwrap();
+        let a = seed(&store, "a");
+        let b = seed(&store, "b");
+        let elsewhere = seed(&store, "z");
+        store.set_lane(&elsewhere.id, Column::Ready).unwrap();
+        let before = store.get_card(&elsewhere.id).unwrap().unwrap().priority;
+
+        store.reorder_in_lane(&b.id, -1).unwrap();
+
+        assert_eq!(
+            store.get_card(&elsewhere.id).unwrap().unwrap().priority,
+            before
+        );
+        assert_eq!(store.cards_in(Column::Backlog).unwrap()[0].id, b.id);
+        let _ = a;
+    }
+
+    #[test]
+    fn reordering_a_card_that_is_gone_is_a_no_op() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(!store.reorder_in_lane("nope", -1).unwrap());
     }
 
     #[test]

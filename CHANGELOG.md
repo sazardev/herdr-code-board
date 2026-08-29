@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+The board is the interface; the CLI is the fallback.
+
+- `a` is one-line capture: type a prompt, press enter, it queues and runs in
+  whichever repo the board is filtered to.
+- `c` chains cards from inside the board — pick the follower, pick the
+  condition. No more dropping to a shell to write a rule.
+- `v` opens a card in full: prompt, rules (named, not "1 card(s)"), run history
+  with the recorded dialog text, and its event log. `d` removes a rule there.
+- `E` edits a prompt in `$EDITOR`, suspending and restoring the terminal.
+- `y` duplicates a card, `J`/`K` reorder within a lane, `Q` queues a whole lane,
+  and `1`..`9` jump straight to one.
+- The TUI holds one SQLite connection for the life of the pane instead of
+  opening a fresh one on every keystroke and every poll tick.
+
 ## 0.2.0
 
 Repositories are found, not typed.

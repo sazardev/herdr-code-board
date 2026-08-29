@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{Card, Column, Repo};
+use crate::model::{Card, Column, Repo, Trigger};
 use crate::store::cards::NewCard;
 
 use super::form::{Field, Form};
@@ -46,6 +46,29 @@ pub enum Request {
     },
     /// The form needs this repo's branches for its `from` chooser.
     LoadBranches(PathBuf),
+
+    /// One line of text becomes a queued card in the current repo. The fast path.
+    QuickAdd(String),
+    /// Open the card's prompt in `$EDITOR`. The run loop suspends the terminal.
+    EditPrompt(String),
+    /// Copy a card into the backlog, ready to tweak.
+    Duplicate(String),
+    /// Move a card up (-1) or down (+1) within its lane.
+    Reorder {
+        card_id: String,
+        delta: i64,
+    },
+    /// Queue every card currently shown in a lane.
+    QueueLane(Vec<String>),
+    /// Read a card's rules, runs and log for the detail overlay.
+    LoadDetail(String),
+    /// Chain one card to another.
+    Chain {
+        from: String,
+        to: String,
+        trigger: Trigger,
+    },
+    DeleteRule(String),
 }
 
 /// What the repo picker is being opened for.
@@ -55,6 +78,66 @@ pub enum PickerTarget {
     Filter,
     /// Set the repo of the card being written.
     Form,
+}
+
+/// What chaining offers. Timed triggers carry a duration people actually use;
+/// anything else is a rule you write in the overlay file.
+pub fn chain_triggers() -> Vec<(&'static str, Trigger)> {
+    vec![
+        ("when it is done", Trigger::Done),
+        ("when it fails", Trigger::Failed),
+        ("when it is blocked", Trigger::Blocked),
+        ("when it goes to review", Trigger::Review),
+        ("after waiting 5m", Trigger::WaitingFor { seconds: 300 }),
+        ("after waiting 15m", Trigger::WaitingFor { seconds: 900 }),
+        ("after waiting 1h", Trigger::WaitingFor { seconds: 3_600 }),
+        ("after 5m blocked", Trigger::BlockedFor { seconds: 300 }),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainStage {
+    PickCard,
+    PickTrigger,
+}
+
+/// Connecting one card to another: choose the follower, then the condition.
+#[derive(Debug, Clone)]
+pub struct Chain {
+    pub from: String,
+    pub from_title: String,
+    pub stage: ChainStage,
+    pub query: String,
+    pub cursor: usize,
+    pub candidates: Vec<(String, String)>,
+    pub chosen: Option<(String, String)>,
+    pub trigger: usize,
+}
+
+impl Chain {
+    pub fn matches(&self) -> Vec<&(String, String)> {
+        if self.query.is_empty() {
+            return self.candidates.iter().collect();
+        }
+        let needle = self.query.to_lowercase();
+        self.candidates
+            .iter()
+            .filter(|(_, title)| title.to_lowercase().contains(&needle))
+            .collect()
+    }
+}
+
+/// A card's rules, history and log, loaded on demand for the detail overlay.
+#[derive(Debug, Clone, Default)]
+pub struct Detail {
+    pub card_id: String,
+    pub title: String,
+    pub prompt: String,
+    /// `(rule id, one-line description)`.
+    pub rules: Vec<(String, String)>,
+    pub runs: Vec<String>,
+    pub events: Vec<String>,
+    pub cursor: usize,
 }
 
 /// One row of the repo picker.
@@ -128,6 +211,12 @@ pub enum Mode {
     Form,
     /// Choosing a repository from what is on disk.
     RepoPicker,
+    /// One-line capture: type a prompt, press enter, it runs.
+    QuickAdd,
+    /// Connecting this card to another one.
+    Chain,
+    /// Everything known about a card: rules, runs, log.
+    Detail,
     /// A yes/no gate in front of something destructive.
     Confirm(String),
 }
@@ -155,6 +244,10 @@ pub struct App {
     pub mode: Mode,
     pub form: Option<Form>,
     pub picker: Option<Picker>,
+    pub chain: Option<Chain>,
+    pub detail: Option<Detail>,
+    /// Buffer for the one-line quick add.
+    pub quick: String,
     /// Set while a scan is in flight, so the board can say so.
     pub scanning: bool,
     /// Selected lane, as an index into [`Column::ALL`].
@@ -179,6 +272,9 @@ impl App {
             mode: Mode::Normal,
             form: None,
             picker: None,
+            chain: None,
+            detail: None,
+            quick: String::new(),
             scanning: false,
             lane: 0,
             cursor: [0; Column::ALL.len()],
@@ -315,6 +411,23 @@ impl App {
         }
     }
 
+    /// Nudge the selected card up or down its lane, following it with the cursor.
+    fn reorder(&mut self, delta: i64) -> Request {
+        let Some(card) = self.selected().cloned() else {
+            return Request::None;
+        };
+        let len = self.lane_cards(self.current_lane()).len();
+        if len < 2 {
+            return Request::None;
+        }
+        let next = (self.cursor[self.lane] as i64 + delta).clamp(0, len as i64 - 1);
+        self.cursor[self.lane] = next as usize;
+        Request::Reorder {
+            card_id: card.id,
+            delta,
+        }
+    }
+
     pub fn on_key(&mut self, key: Key) -> Request {
         match self.mode.clone() {
             Mode::Normal => self.key_normal(key),
@@ -326,6 +439,9 @@ impl App {
             Mode::Confirm(_) => self.key_confirm(key),
             Mode::Form => self.key_form(key),
             Mode::RepoPicker => self.key_picker(key),
+            Mode::QuickAdd => self.key_quick(key),
+            Mode::Chain => self.key_chain(key),
+            Mode::Detail => self.key_detail(key),
         }
     }
 
@@ -349,6 +465,14 @@ impl App {
                 self.move_cursor(-1);
                 Request::None
             }
+            // Jump straight to a lane. Faster than walking there.
+            Key::Char(c @ '1'..='9') => {
+                let idx = c as usize - '1' as usize;
+                if idx < Column::ALL.len() {
+                    self.lane = idx;
+                }
+                Request::None
+            }
             Key::Char('g') => {
                 self.cursor[self.lane] = 0;
                 Request::None
@@ -359,6 +483,71 @@ impl App {
             }
             Key::Char('H') => self.shift_card(-1),
             Key::Char('L') => self.shift_card(1),
+            Key::Char('K') => self.reorder(-1),
+            Key::Char('J') => self.reorder(1),
+
+            // Capture: one line, queued immediately.
+            Key::Char('a') => {
+                self.quick.clear();
+                self.mode = Mode::QuickAdd;
+                Request::None
+            }
+            Key::Char('y') => match self.selected() {
+                Some(card) => Request::Duplicate(card.id.clone()),
+                None => Request::None,
+            },
+            Key::Char('E') => match self.selected() {
+                Some(card) => Request::EditPrompt(card.id.clone()),
+                None => Request::None,
+            },
+            Key::Char('v') => match self.selected() {
+                Some(card) => Request::LoadDetail(card.id.clone()),
+                None => Request::None,
+            },
+            Key::Char('c') => match self.selected().cloned() {
+                Some(card) => {
+                    let candidates: Vec<(String, String)> = self
+                        .cards
+                        .iter()
+                        .filter(|c| c.id != card.id)
+                        .map(|c| (c.id.clone(), c.title.clone()))
+                        .collect();
+                    if candidates.is_empty() {
+                        self.status = "add a second card first, then chain them".into();
+                        return Request::None;
+                    }
+                    self.chain = Some(Chain {
+                        from: card.id.clone(),
+                        from_title: card.title.clone(),
+                        stage: ChainStage::PickCard,
+                        query: String::new(),
+                        cursor: 0,
+                        candidates,
+                        chosen: None,
+                        trigger: 0,
+                    });
+                    self.mode = Mode::Chain;
+                    Request::None
+                }
+                None => Request::None,
+            },
+            Key::Char('Q') => {
+                let lane = self.current_lane();
+                if lane.is_live() || lane == Column::Ready {
+                    self.status = format!("{lane} is already moving");
+                    return Request::None;
+                }
+                let ids: Vec<String> = self
+                    .lane_cards(lane)
+                    .into_iter()
+                    .map(|c| c.id.clone())
+                    .collect();
+                if ids.is_empty() {
+                    Request::None
+                } else {
+                    Request::QueueLane(ids)
+                }
+            }
             Key::Char(' ') => match self.selected().cloned() {
                 Some(card) if card.column == Column::Ready => Request::SetLane {
                     card_id: card.id,
@@ -573,6 +762,154 @@ impl App {
                 form.repo = idx;
             }
         }
+    }
+
+    fn key_quick(&mut self, key: Key) -> Request {
+        match key {
+            Key::Esc => {
+                self.quick.clear();
+                self.mode = Mode::Normal;
+                Request::None
+            }
+            Key::Backspace => {
+                self.quick.pop();
+                Request::None
+            }
+            Key::Char(c) => {
+                self.quick.push(c);
+                Request::None
+            }
+            Key::Enter => {
+                let text = self.quick.trim().to_string();
+                self.mode = Mode::Normal;
+                self.quick.clear();
+                if text.is_empty() {
+                    Request::None
+                } else {
+                    Request::QuickAdd(text)
+                }
+            }
+            _ => Request::None,
+        }
+    }
+
+    fn key_chain(&mut self, key: Key) -> Request {
+        let Some(chain) = self.chain.as_mut() else {
+            self.mode = Mode::Normal;
+            return Request::None;
+        };
+        match chain.stage {
+            ChainStage::PickCard => match key {
+                Key::Esc => {
+                    self.chain = None;
+                    self.mode = Mode::Normal;
+                    Request::None
+                }
+                Key::Down | Key::Tab => {
+                    let len = chain.matches().len();
+                    if len > 0 {
+                        chain.cursor = (chain.cursor + 1) % len;
+                    }
+                    Request::None
+                }
+                Key::Up | Key::BackTab => {
+                    let len = chain.matches().len();
+                    if len > 0 {
+                        chain.cursor = (chain.cursor + len - 1) % len;
+                    }
+                    Request::None
+                }
+                Key::Backspace => {
+                    chain.query.pop();
+                    chain.cursor = 0;
+                    Request::None
+                }
+                Key::Char(c) => {
+                    chain.query.push(c);
+                    chain.cursor = 0;
+                    Request::None
+                }
+                Key::Enter => {
+                    if let Some(pick) = chain.matches().get(chain.cursor).map(|p| (*p).clone()) {
+                        chain.chosen = Some(pick);
+                        chain.stage = ChainStage::PickTrigger;
+                        chain.cursor = 0;
+                    }
+                    Request::None
+                }
+                _ => Request::None,
+            },
+            ChainStage::PickTrigger => match key {
+                // Back to the card list rather than losing the whole thing.
+                Key::Esc => {
+                    chain.stage = ChainStage::PickCard;
+                    chain.chosen = None;
+                    Request::None
+                }
+                Key::Down | Key::Tab => {
+                    chain.trigger = (chain.trigger + 1) % chain_triggers().len();
+                    Request::None
+                }
+                Key::Up | Key::BackTab => {
+                    let len = chain_triggers().len();
+                    chain.trigger = (chain.trigger + len - 1) % len;
+                    Request::None
+                }
+                Key::Enter => {
+                    let triggers = chain_triggers();
+                    let trigger = triggers[chain.trigger.min(triggers.len() - 1)].1.clone();
+                    let from = chain.from.clone();
+                    let to = chain.chosen.as_ref().map(|(id, _)| id.clone());
+                    self.chain = None;
+                    self.mode = Mode::Normal;
+                    match to {
+                        Some(to) => Request::Chain { from, to, trigger },
+                        None => Request::None,
+                    }
+                }
+                _ => Request::None,
+            },
+        }
+    }
+
+    fn key_detail(&mut self, key: Key) -> Request {
+        let Some(detail) = self.detail.as_mut() else {
+            self.mode = Mode::Normal;
+            return Request::None;
+        };
+        match key {
+            Key::Esc | Key::Char('q') | Key::Char('v') => {
+                self.detail = None;
+                self.mode = Mode::Normal;
+                Request::None
+            }
+            Key::Down | Key::Char('j') => {
+                if !detail.rules.is_empty() {
+                    detail.cursor = (detail.cursor + 1) % detail.rules.len();
+                }
+                Request::None
+            }
+            Key::Up | Key::Char('k') => {
+                if !detail.rules.is_empty() {
+                    let len = detail.rules.len();
+                    detail.cursor = (detail.cursor + len - 1) % len;
+                }
+                Request::None
+            }
+            // Remove the highlighted rule.
+            Key::Char('d') => match detail.rules.get(detail.cursor) {
+                Some((id, _)) => Request::DeleteRule(id.clone()),
+                None => Request::None,
+            },
+            Key::Char('E') => Request::EditPrompt(detail.card_id.clone()),
+            _ => Request::None,
+        }
+    }
+
+    /// Show a loaded detail overlay.
+    pub fn open_detail(&mut self, detail: Detail) {
+        self.detail = Some(detail);
+        self.mode = Mode::Detail;
     }
 
     fn key_confirm(&mut self, key: Key) -> Request {
@@ -1062,6 +1399,181 @@ mod tests {
         a.form.as_mut().unwrap().field = idx;
         assert_eq!(a.on_key(Key::Enter), Request::ScanRepos(PickerTarget::Form));
         assert!(a.form.is_some(), "the half-written card is not thrown away");
+    }
+
+    #[test]
+    fn digits_jump_straight_to_a_lane() {
+        let mut a = app();
+        a.on_key(Key::Char('3'));
+        assert_eq!(a.current_lane(), Column::Running);
+        a.on_key(Key::Char('1'));
+        assert_eq!(a.current_lane(), Column::Backlog);
+    }
+
+    #[test]
+    fn quick_add_captures_a_line_and_queues_it() {
+        let mut a = app();
+        a.on_key(Key::Char('a'));
+        assert_eq!(a.mode, Mode::QuickAdd);
+        for c in "fix the lint".chars() {
+            a.on_key(Key::Char(c));
+        }
+        a.on_key(Key::Backspace);
+        assert_eq!(
+            a.on_key(Key::Enter),
+            Request::QuickAdd("fix the lin".into())
+        );
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(a.quick.is_empty(), "the buffer is cleared for next time");
+    }
+
+    #[test]
+    fn quick_add_ignores_an_empty_line_and_escape_throws_it_away() {
+        let mut a = app();
+        a.on_key(Key::Char('a'));
+        assert_eq!(a.on_key(Key::Enter), Request::None);
+
+        a.on_key(Key::Char('a'));
+        a.on_key(Key::Char('x'));
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(a.quick.is_empty());
+    }
+
+    #[test]
+    fn chaining_picks_a_card_then_a_condition() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        assert_eq!(a.mode, Mode::Chain);
+        let chain = a.chain.as_ref().unwrap();
+        assert_eq!(chain.from_title, "alpha");
+        assert_eq!(chain.candidates.len(), 2, "itself is not a candidate");
+
+        for c in "gam".chars() {
+            a.on_key(Key::Char(c));
+        }
+        assert_eq!(a.chain.as_ref().unwrap().matches().len(), 1);
+        a.on_key(Key::Enter);
+        assert_eq!(a.chain.as_ref().unwrap().stage, ChainStage::PickTrigger);
+
+        // Second entry in the trigger list is "when it fails".
+        a.on_key(Key::Down);
+        match a.on_key(Key::Enter) {
+            Request::Chain { from, to, trigger } => {
+                assert_eq!(from, "1");
+                assert_eq!(to, "3");
+                assert_eq!(trigger, Trigger::Failed);
+            }
+            other => panic!("expected Chain, got {other:?}"),
+        }
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn escaping_the_trigger_step_goes_back_to_the_card_list() {
+        let mut a = app();
+        a.on_key(Key::Char('c'));
+        a.on_key(Key::Enter);
+        assert_eq!(a.chain.as_ref().unwrap().stage, ChainStage::PickTrigger);
+        a.on_key(Key::Esc);
+        assert_eq!(a.chain.as_ref().unwrap().stage, ChainStage::PickCard);
+        assert_eq!(a.mode, Mode::Chain, "the whole thing is not abandoned");
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn chaining_needs_something_to_chain_to() {
+        let mut a = app();
+        a.load(vec![card("1", "alone", Column::Backlog)], vec![]);
+        assert_eq!(a.on_key(Key::Char('c')), Request::None);
+        assert!(a.status.contains("second card"));
+    }
+
+    #[test]
+    fn reordering_moves_the_cursor_with_the_card() {
+        let mut a = app();
+        assert_eq!(a.selected().unwrap().title, "alpha");
+        assert_eq!(
+            a.on_key(Key::Char('J')),
+            Request::Reorder {
+                card_id: "1".into(),
+                delta: 1
+            }
+        );
+        assert_eq!(a.cursor[a.lane], 1, "the cursor follows the card down");
+    }
+
+    #[test]
+    fn reordering_a_lane_of_one_does_nothing() {
+        let mut a = app();
+        a.lane = Column::ALL
+            .iter()
+            .position(|c| *c == Column::Running)
+            .unwrap();
+        assert_eq!(a.on_key(Key::Char('J')), Request::None);
+    }
+
+    #[test]
+    fn queueing_a_whole_lane_sends_every_visible_card() {
+        let mut a = app();
+        match a.on_key(Key::Char('Q')) {
+            Request::QueueLane(ids) => assert_eq!(ids, vec!["1", "2"]),
+            other => panic!("expected QueueLane, got {other:?}"),
+        }
+
+        // A search narrows what "the lane" means, which is the point.
+        a.on_key(Key::Char('/'));
+        for c in "alp".chars() {
+            a.on_key(Key::Char(c));
+        }
+        a.on_key(Key::Enter);
+        match a.on_key(Key::Char('Q')) {
+            Request::QueueLane(ids) => assert_eq!(ids, vec!["1"]),
+            other => panic!("expected QueueLane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_live_lane_is_not_bulk_queued() {
+        let mut a = app();
+        a.lane = Column::ALL
+            .iter()
+            .position(|c| *c == Column::Running)
+            .unwrap();
+        assert_eq!(a.on_key(Key::Char('Q')), Request::None);
+        assert!(a.status.contains("already moving"));
+    }
+
+    #[test]
+    fn the_detail_overlay_walks_rules_and_removes_one() {
+        let mut a = app();
+        assert_eq!(a.on_key(Key::Char('v')), Request::LoadDetail("1".into()));
+
+        a.open_detail(Detail {
+            card_id: "1".into(),
+            title: "alpha".into(),
+            prompt: "p".into(),
+            rules: vec![
+                ("R1".into(), "when it is done → queue 1".into()),
+                ("R2".into(), "when it fails → notify".into()),
+            ],
+            runs: vec![],
+            events: vec![],
+            cursor: 0,
+        });
+        assert_eq!(a.mode, Mode::Detail);
+        a.on_key(Key::Char('j'));
+        assert_eq!(a.on_key(Key::Char('d')), Request::DeleteRule("R2".into()));
+        a.on_key(Key::Esc);
+        assert_eq!(a.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn duplicating_and_editing_address_the_selected_card() {
+        let mut a = app();
+        assert_eq!(a.on_key(Key::Char('y')), Request::Duplicate("1".into()));
+        assert_eq!(a.on_key(Key::Char('E')), Request::EditPrompt("1".into()));
     }
 
     #[test]

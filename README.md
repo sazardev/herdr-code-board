@@ -137,14 +137,26 @@ By default a card completes when its agent's turn ends. Pass `--review` (or
 ### Keys
 
 ```
-h l ← →   lanes                 n   new card
-j k ↑ ↓   cards                 e   edit
-g G       first / last          t   pick a repository (scans your disk)
-H L       shift a lane over     x   cancel and release the pane
-space     queue / unqueue       r   re-dispatch from scratch
-enter     jump to the pane      d   delete (asks first)
-/         search                tab cycle the repo filter
-s         re-import overlays    R   reload      ?   help      q  quit
+a         quick add — one line, queued immediately
+n         new card, full form
+space     queue / unqueue        Q    queue the whole lane
+enter     jump to the herdr pane
+v         detail: rules, runs, log
+c         chain this card to another one
+e         edit the card          E    edit the prompt in $EDITOR
+y         duplicate
+
+h l ← →   lanes                  1..9 jump to a lane
+j k ↑ ↓   cards                  g G  first / last
+H L       shift a lane over      J K  move up/down the lane
+
+t         pick a repository      tab  cycle the repo filter
+/         search
+
+x         cancel and release the pane
+r         re-dispatch from scratch
+d         delete (asks first)
+s         re-import overlays     R    reload    ?  help    q  quit
 ```
 
 ## Placement
@@ -165,9 +177,26 @@ what to cut it from; see [Branches](#branches).
 Split direction follows herdr's own geometry rule: wide panes split right, tall
 panes split down. Override with `--direction right|down` and `--ratio`.
 
+### The fast path
+
+`a`, type a line, enter. The card lands in whichever repo the board is filtered
+to, with that repo's default agent, and starts immediately. That is the whole
+loop for "run this against that repo, now".
+
+For anything with structure, `n` opens the form. `E` on any card hands its
+prompt to `$EDITOR` and takes the terminal back when you are done — a prompt is
+the one field that genuinely wants more than one line.
+
 ## Rules
 
 Rules are what make the board a workflow rather than a list.
+
+In the board, `c` chains the selected card to another: pick the follower, pick
+the condition (`when it is done`, `when it fails`, `after waiting 15m`, …).
+`v` shows everything a card carries — its prompt, its rules, its run history and
+its log — and `d` there removes a rule.
+
+From the shell:
 
 ```sh
 # when "write the code" completes, queue "run the tests"

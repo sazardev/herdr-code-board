@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use ratatui::Frame;
 
 use super::form::{placement_summary, Field, Flag};
-use super::state::{App, Mode, PickerTarget};
+use super::state::{chain_triggers, App, ChainStage, Mode, PickerTarget};
 use super::theme::Theme;
 use crate::app::ago;
 use crate::model::Column;
@@ -35,6 +35,8 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
             }
             draw_picker(frame, app, theme);
         }
+        Mode::Chain => draw_chain(frame, app, theme),
+        Mode::Detail => draw_detail_overlay(frame, app, theme),
         Mode::Help => draw_help(frame, theme),
         Mode::Confirm(question) => draw_confirm(frame, question, theme),
         _ => {}
@@ -247,8 +249,23 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    if app.mode == Mode::QuickAdd {
+        let repo = app.filter_label();
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(
+                    format!(" queue in {repo} › "),
+                    Style::default().fg(theme.accent).bold(),
+                ),
+                Span::raw(app.quick.clone()),
+                Span::styled("_", Style::default().fg(theme.accent)),
+            ]),
+            area,
+        );
+        return;
+    }
     let text = if app.status.is_empty() {
-        "hjkl move · HL shift lane · space queue · enter jump to pane · n new · e edit · t repos · x cancel · r retry · d delete · / search · s sync · ? help · q quit".to_string()
+        "a quick add · space queue · enter pane · v detail · c chain · e edit · E prompt · y copy · HL lane · JK order · x cancel · r retry · d delete · t repos · / search · ? help".to_string()
     } else {
         app.status.clone()
     };
@@ -454,27 +471,35 @@ fn home_relative(path: &std::path::Path) -> String {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("h l ← →", "move between lanes"),
-    ("j k ↑ ↓", "move between cards"),
-    ("g G", "first / last card in the lane"),
-    ("H L", "shift the card one lane over"),
+    ("a", "quick add — one line, queued immediately"),
+    ("n", "new card, full form"),
     ("space", "queue a card, or take it back off the queue"),
+    ("Q", "queue every card in this lane"),
     ("enter", "focus the herdr pane the card runs in"),
-    ("n", "new card"),
-    ("e", "edit the selected card"),
+    ("v", "detail: rules, run history, log"),
+    ("c", "chain this card to another one"),
+    ("e", "edit the card"),
+    ("E", "edit the prompt in $EDITOR"),
+    ("y", "duplicate the card"),
+    ("", ""),
+    ("h l ← →", "lanes          1..9  jump to a lane"),
+    ("j k ↑ ↓", "cards          g G   first / last"),
+    ("H L", "shift the card one lane over"),
+    ("J K", "move the card up or down its lane"),
+    ("", ""),
+    ("t", "pick a repository (scans your disk)"),
+    ("tab", "cycle the repo filter"),
+    ("/", "search titles, prompts and tags"),
+    ("", ""),
     ("x", "cancel a running card and release its pane"),
     ("r", "re-dispatch the card from scratch"),
     ("d", "delete the card (asks first)"),
-    ("/", "search titles, prompts and tags"),
-    ("t", "pick a repository — scans your disk for checkouts"),
-    ("tab", "cycle the repo filter"),
-    ("s", "re-import .herdr-board.toml from tracked repos"),
-    ("R", "reload from the database"),
-    ("q esc", "quit"),
+    ("s", "re-import .herdr-board.toml"),
+    ("R", "reload      ?  help      q  quit"),
 ];
 
 fn draw_help(frame: &mut Frame, theme: &Theme) {
-    let area = popup(frame, 62, (HELP.len() + 2) as u16);
+    let area = popup(frame, 64, (HELP.len() + 2) as u16);
     frame.render_widget(Clear, area);
     let lines: Vec<Line> = HELP
         .iter()
@@ -497,6 +522,200 @@ fn draw_help(frame: &mut Frame, theme: &Theme) {
         ),
         area,
     );
+}
+
+fn draw_chain(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(chain) = &app.chain else { return };
+
+    match chain.stage {
+        ChainStage::PickCard => {
+            let matches = chain.matches();
+            let rows = matches.len().clamp(1, 12) as u16;
+            let area = popup(frame, 70, rows + 4);
+            frame.render_widget(Clear, area);
+
+            let block = Block::bordered()
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(theme.accent))
+                .title(Span::styled(
+                    format!(" after “{}”, run… ", truncate(&chain.from_title, 34)),
+                    Style::default().fg(theme.accent).bold(),
+                ))
+                .title_bottom(Span::styled(
+                    " type to filter · ↑↓ move · enter pick · esc cancel ",
+                    Style::default().fg(theme.muted),
+                ));
+
+            let [search, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
+                .areas(block.inner(area));
+            frame.render_widget(block, area);
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(" › ", Style::default().fg(theme.accent)),
+                    Span::raw(chain.query.clone()),
+                    Span::styled("_", Style::default().fg(theme.accent)),
+                ]),
+                search,
+            );
+
+            let items: Vec<ListItem> = matches
+                .iter()
+                .map(|(_, title)| ListItem::new(format!(" {}", truncate(title, 60))))
+                .collect();
+            let mut state = ListState::default();
+            if !matches.is_empty() {
+                state.select(Some(chain.cursor.min(matches.len() - 1)));
+            }
+            frame.render_stateful_widget(
+                List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                list,
+                &mut state,
+            );
+        }
+
+        ChainStage::PickTrigger => {
+            let triggers = chain_triggers();
+            let area = popup(frame, 62, triggers.len() as u16 + 3);
+            frame.render_widget(Clear, area);
+
+            let target = chain
+                .chosen
+                .as_ref()
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("it");
+            let block = Block::bordered()
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(theme.accent))
+                .title(Span::styled(
+                    format!(" run “{}” … ", truncate(target, 34)),
+                    Style::default().fg(theme.accent).bold(),
+                ))
+                .title_bottom(Span::styled(
+                    " ↑↓ move · enter confirm · esc back ",
+                    Style::default().fg(theme.muted),
+                ));
+
+            let items: Vec<ListItem> = triggers
+                .iter()
+                .map(|(label, _)| ListItem::new(format!(" {label}")))
+                .collect();
+            let mut state = ListState::default();
+            state.select(Some(chain.trigger.min(triggers.len() - 1)));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(block)
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                area,
+                &mut state,
+            );
+        }
+    }
+}
+
+fn draw_detail_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(detail) = &app.detail else { return };
+    let full = frame.area();
+    let area = popup(
+        frame,
+        full.width.saturating_sub(8).min(110),
+        full.height.saturating_sub(4),
+    );
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {} ", truncate(&detail.title, 60)),
+            Style::default().fg(theme.accent).bold(),
+        ))
+        .title_bottom(Span::styled(
+            " jk over rules · d remove one · E edit the prompt · esc close ",
+            Style::default().fg(theme.muted),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [prompt_area, rules_area, runs_area] = Layout::vertical([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(if detail.prompt.trim().is_empty() {
+            "(no prompt — press E to write one)".to_string()
+        } else {
+            detail.prompt.clone()
+        })
+        .wrap(Wrap { trim: false })
+        .block(section("prompt", theme)),
+        prompt_area,
+    );
+
+    let rules: Vec<ListItem> = if detail.rules.is_empty() {
+        vec![ListItem::new(
+            " no rules — press c on the board to chain a card",
+        )]
+    } else {
+        detail
+            .rules
+            .iter()
+            .map(|(_, text)| ListItem::new(format!(" {text}")))
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !detail.rules.is_empty() {
+        state.select(Some(detail.cursor.min(detail.rules.len() - 1)));
+    }
+    frame.render_stateful_widget(
+        List::new(rules)
+            .block(section("rules", theme))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        rules_area,
+        &mut state,
+    );
+
+    let mut history: Vec<Line> = detail
+        .runs
+        .iter()
+        .flat_map(|r| {
+            r.lines()
+                .map(|l| Line::from(l.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if !detail.events.is_empty() {
+        history.push(Line::from(Span::styled(
+            "log",
+            Style::default().fg(theme.muted),
+        )));
+        history.extend(detail.events.iter().map(|e| {
+            Line::from(Span::styled(
+                format!("  {e}"),
+                Style::default().fg(theme.muted),
+            ))
+        }));
+    }
+    if history.is_empty() {
+        history.push(Line::from("never dispatched"));
+    }
+    frame.render_widget(
+        Paragraph::new(history)
+            .wrap(Wrap { trim: true })
+            .block(section("runs", theme)),
+        runs_area,
+    );
+}
+
+fn section(title: &'static str, theme: &Theme) -> Block<'static> {
+    Block::bordered()
+        .border_style(Style::default().fg(theme.muted))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(theme.muted),
+        ))
 }
 
 fn draw_confirm(frame: &mut Frame, question: &str, theme: &Theme) {

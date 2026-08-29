@@ -16,10 +16,14 @@ use serde::{Deserialize, Serialize};
 pub struct Paths {
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
+    /// False when herdr did not inject the plugin directories, so these are the
+    /// XDG fallbacks — a *different* board from the one the plugin's hooks use.
+    pub from_herdr: bool,
 }
 
 impl Paths {
     pub fn resolve() -> Result<Self> {
+        let from_herdr = env::var_os("HERDR_PLUGIN_STATE_DIR").is_some();
         let config_dir = match env::var_os("HERDR_PLUGIN_CONFIG_DIR") {
             Some(v) => PathBuf::from(v),
             None => xdg_dir("XDG_CONFIG_HOME", ".config")?.join("herdr-code-board"),
@@ -35,6 +39,7 @@ impl Paths {
         Ok(Self {
             config_dir,
             state_dir,
+            from_herdr,
         })
     }
 
@@ -217,6 +222,7 @@ mod tests {
         let paths = Paths {
             config_dir: dir.path().to_path_buf(),
             state_dir: dir.path().to_path_buf(),
+            from_herdr: false,
         };
         std::fs::write(
             paths.config_file(),

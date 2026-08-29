@@ -607,6 +607,13 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
     println!("paths");
     println!("  config  {}", paths.config_file().display());
     println!("  state   {}", paths.database().display());
+    if !paths.from_herdr {
+        problems += 1;
+        println!("  WARNING herdr did not inject HERDR_PLUGIN_STATE_DIR, so this is a");
+        println!("          different board from the one the plugin's hooks write to.");
+        println!("          Run this through herdr, or export HERDR_PLUGIN_STATE_DIR");
+        println!("          and HERDR_PLUGIN_CONFIG_DIR to the plugin's directories.");
+    }
 
     println!("\nherdr");
     let api = CliHerdr::new();

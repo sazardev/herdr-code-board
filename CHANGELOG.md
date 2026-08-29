@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+- `configure --apply` now also makes sure the timer daemon is this build, so one
+  command leaves everything consistent after an upgrade.
+
 ## 0.5.1
 
 - **Upgrading the plugin left the previous daemon running.** Installing a new

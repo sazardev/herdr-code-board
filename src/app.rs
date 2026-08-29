@@ -253,6 +253,14 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
     println!("  prefix+b        open the board");
     println!("  prefix+shift+b  queue a prompt");
     println!("  prefix+alt+b    re-import board cards");
+
+    // Leave the daemon on this build too. An upgrade does not restart herdr, so
+    // without this the previous binary keeps the job until it does.
+    match crate::engine::daemon::ensure_running(&Paths::resolve()?) {
+        Ok(true) => println!("  timer daemon started"),
+        Ok(false) => println!("  timer daemon will hand over on its next tick"),
+        Err(e) => println!("  could not check the timer daemon: {e}"),
+    }
     reload_herdr();
     Ok(())
 }

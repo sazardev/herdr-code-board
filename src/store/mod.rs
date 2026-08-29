@@ -133,7 +133,9 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// ULIDs sort by creation time, which keeps `ORDER BY id` meaningful.
+/// ULIDs carry a millisecond timestamp, so they sort roughly by creation — but
+/// only roughly: two made inside the same millisecond are ordered by their
+/// random tail. Anywhere creation order actually matters, order by `rowid`.
 pub fn new_id() -> String {
     ulid::Ulid::generate().to_string()
 }

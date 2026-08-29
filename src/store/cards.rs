@@ -254,14 +254,16 @@ impl Store {
 
     /// Every card, in board order.
     ///
-    /// The `id` tiebreak matters: ULIDs make it creation order, and without it
-    /// two cards made in the same second come back in whatever order SQLite
-    /// feels like — which showed up as a dispatch order that differed between
-    /// machines.
+    /// The `rowid` tiebreak matters. `created_at` is whole seconds, so cards made
+    /// in the same second tie, and SQLite then returns them in whatever order it
+    /// likes — a dispatch order that differed between machines. `id` is not a
+    /// substitute: a ULID only sorts by time across milliseconds, and two
+    /// generated inside one are ordered by their random tail. `rowid` is
+    /// insertion order, which is what "created first" actually means here.
     pub fn list_cards(&self) -> Result<Vec<Card>> {
-        let mut stmt = self
-            .conn()
-            .prepare(&format!("{SELECT} ORDER BY priority DESC, created_at, id"))?;
+        let mut stmt = self.conn().prepare(&format!(
+            "{SELECT} ORDER BY priority DESC, created_at, rowid"
+        ))?;
         let rows = stmt
             .query_map([], row_to_card)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -270,7 +272,7 @@ impl Store {
 
     pub fn cards_in(&self, column: Column) -> Result<Vec<Card>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{SELECT} WHERE lane = ?1 ORDER BY priority DESC, created_at, id"
+            "{SELECT} WHERE lane = ?1 ORDER BY priority DESC, created_at, rowid"
         ))?;
         let rows = stmt
             .query_map([column.as_str()], row_to_card)?
@@ -281,7 +283,7 @@ impl Store {
     /// Cards currently holding a herdr pane, used for concurrency accounting.
     pub fn live_cards(&self) -> Result<Vec<Card>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{SELECT} WHERE lane IN ('running','waiting','blocked') ORDER BY status_since, id"
+            "{SELECT} WHERE lane IN ('running','waiting','blocked') ORDER BY status_since, rowid"
         ))?;
         let rows = stmt
             .query_map([], row_to_card)?
@@ -533,6 +535,26 @@ mod tests {
         assert_eq!(back.binding.pane_id.as_deref(), Some("w2:p1"));
         assert_eq!(back.last_error.as_deref(), Some("boom"));
         assert!(back.auto_answer);
+    }
+
+    /// Cards created in the same second must still come back in the order they
+    /// were made. This broke on CI while passing locally, because the tiebreak
+    /// was the ULID's random tail rather than insertion order.
+    #[test]
+    fn cards_made_in_the_same_second_keep_their_order() {
+        for _ in 0..20 {
+            let store = Store::open_in_memory().unwrap();
+            let made: Vec<String> = (0..8)
+                .map(|i| seed(&store, &format!("card {i}")).title)
+                .collect();
+            let listed: Vec<String> = store
+                .list_cards()
+                .unwrap()
+                .into_iter()
+                .map(|c| c.title)
+                .collect();
+            assert_eq!(listed, made);
+        }
     }
 
     #[test]

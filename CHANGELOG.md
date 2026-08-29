@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0
+
+The board lives inside herdr now, not beside it.
+
+- `configure --apply` wires it in: `prefix+b` opens the board, `prefix+shift+b`
+  opens a popup that takes one line and queues it, `prefix+alt+b` re-imports
+  overlays. Ordinary `[[keys.command]]` bindings, so they appear in herdr's key
+  help.
+- Every pane a card owns publishes `$board_card`, `$board_next` and
+  `$board_meta` into the Agent sidebar; every workspace publishes `$board_space`
+  into the Spaces sidebar. Tokens are written only when a value actually
+  changed, because a metadata write can repaint a pane a human is watching.
+- Cards reaching `blocked` or `failed` raise a herdr notification with the
+  matching sound. Configurable through `notify_on`.
+- The config edit is textual and surgical: it appends one row per sidebar and
+  three keybindings, preserves other plugins' rows and every comment, backs the
+  file up, and refuses to write a config herdr could not parse.
+  `configure --uninstall` takes back exactly what it added.
+- A pane or workspace that disappears is forgotten instead of failing every
+  later publish.
+
 ## 0.3.0
 
 The board is the interface; the CLI is the fallback.

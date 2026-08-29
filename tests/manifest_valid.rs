@@ -150,6 +150,7 @@ fn every_subcommand_the_manifest_invokes_exists_in_the_cli() {
             .map(|(_, rest)| rest)
             .unwrap_or_default();
         let sub = after.split_whitespace().next().unwrap_or_default();
+        // `board --quick` and friends: only the subcommand is checked here.
         assert!(
             known.contains(sub),
             "the manifest invokes `{sub}`, which is not a subcommand; known: {known:?}"
@@ -172,6 +173,36 @@ fn ids_are_unique_within_each_kind_and_carry_no_dots() {
                 "invalid id: {id}"
             );
         }
+    }
+}
+
+/// The leader keybindings we write into herdr's config name plugin actions by
+/// id. A binding pointing at an action that does not exist is a dead key.
+#[test]
+fn every_keybinding_the_installer_writes_names_a_real_action() {
+    let m = manifest();
+    let ids: BTreeSet<String> = m.actions.iter().filter_map(|a| a.id.clone()).collect();
+
+    let wired = herdr_code_board::integrate::apply("").unwrap();
+    for line in wired.lines() {
+        let Some(rest) = line.trim().strip_prefix("command = \"herdr-code-board.") else {
+            continue;
+        };
+        let action = rest.trim_end_matches('"');
+        assert!(
+            ids.contains(action),
+            "the installer binds a key to `{action}`, which is not an action; have {ids:?}"
+        );
+    }
+}
+
+/// The pane entrypoints the actions ask herdr to open must exist too.
+#[test]
+fn the_entrypoints_the_actions_open_are_declared_as_panes() {
+    let m = manifest();
+    let panes: BTreeSet<String> = m.panes.iter().filter_map(|p| p.id.clone()).collect();
+    for name in ["board", "quick"] {
+        assert!(panes.contains(name), "missing the `{name}` pane entrypoint");
     }
 }
 

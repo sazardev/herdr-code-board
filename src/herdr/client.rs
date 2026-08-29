@@ -13,7 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 
 use super::types::*;
-use super::{HerdrApi, WorkspaceCreated};
+use super::{HerdrApi, Sound, Tokens, WorkspaceCreated};
 use crate::model::SplitDirection;
 
 pub struct CliHerdr {
@@ -271,12 +271,58 @@ impl HerdrApi for CliHerdr {
         self.call_created(&argv)
     }
 
-    fn notify(&self, title: &str, body: Option<&str>) -> Result<()> {
+    fn notify(&self, title: &str, body: Option<&str>, sound: Sound) -> Result<()> {
         let mut argv: Vec<&str> = vec!["notification", "show", title];
         if let Some(b) = body {
             argv.push("--body");
             argv.push(b);
         }
+        argv.push("--sound");
+        argv.push(sound.as_str());
         self.call_raw(&argv).map(|_| ())
+    }
+
+    fn report_pane_tokens(&self, pane_id: &str, source: &str, tokens: &Tokens) -> Result<()> {
+        let mut argv: Vec<String> = vec![
+            "pane".into(),
+            "report-metadata".into(),
+            pane_id.into(),
+            "--source".into(),
+            source.into(),
+        ];
+        push_tokens(&mut argv, tokens);
+        self.call_raw(&argv.iter().map(String::as_str).collect::<Vec<_>>())
+            .map(|_| ())
+    }
+
+    fn report_workspace_tokens(
+        &self,
+        workspace_id: &str,
+        source: &str,
+        tokens: &Tokens,
+    ) -> Result<()> {
+        let mut argv: Vec<String> = vec![
+            "workspace".into(),
+            "report-metadata".into(),
+            workspace_id.into(),
+            "--source".into(),
+            source.into(),
+        ];
+        push_tokens(&mut argv, tokens);
+        self.call_raw(&argv.iter().map(String::as_str).collect::<Vec<_>>())
+            .map(|_| ())
+    }
+}
+
+/// An empty value means "remove this token", which is a different flag.
+fn push_tokens(argv: &mut Vec<String>, tokens: &Tokens) {
+    for (name, value) in tokens {
+        if value.is_empty() {
+            argv.push("--clear-token".into());
+            argv.push(name.clone());
+        } else {
+            argv.push("--token".into());
+            argv.push(format!("{name}={value}"));
+        }
     }
 }

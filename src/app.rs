@@ -22,8 +22,10 @@ pub fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve()?;
     let config = Config::load(&paths)?;
 
-    match cli.command.unwrap_or(Command::Board) {
-        Command::Board => crate::tui::run(&paths, &config),
+    match cli.command.unwrap_or(Command::Board { quick: false }) {
+        Command::Board { quick } => crate::tui::run(&paths, &config, quick),
+        Command::Quick => open_pane("quick"),
+        Command::Configure(args) => configure(args),
         Command::Daemon => daemon::run(&paths, &config),
         Command::Startup => startup(&paths, &config),
         Command::Event => event(&paths, &config),
@@ -157,22 +159,100 @@ fn event(paths: &Paths, config: &Config) -> Result<()> {
     }
 
     exec.dispatch_ready()?;
+    // One publish per invocation: herdr fires this hook twice per agent turn,
+    // and a metadata write can repaint the pane the user is watching.
+    exec.present()?;
     Ok(())
 }
 
-fn open_board() -> Result<()> {
+fn open_pane(entrypoint: &str) -> Result<()> {
     CliHerdr::new()
         .call_raw(&[
             "plugin",
             "pane",
             "open",
             "--plugin",
-            "herdr-code-board",
+            crate::integrate::MARKER,
             "--entrypoint",
-            "board",
+            entrypoint,
         ])
-        .context("asking herdr to open the board pane")?;
+        .with_context(|| format!("asking herdr to open the {entrypoint} pane"))?;
     Ok(())
+}
+
+fn open_board() -> Result<()> {
+    open_pane("board")
+}
+
+/// Wire the board into herdr's own config, or take the wiring back out.
+///
+/// This edits a file the user and other plugins share, so it is never automatic:
+/// it reports by default, backs up before writing, and refuses to produce a
+/// config herdr could not parse.
+fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
+    let path = crate::integrate::config_path()?;
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let status = crate::integrate::inspect(&body);
+
+    if args.uninstall {
+        let out = crate::integrate::uninstall(&body)?;
+        if out == body {
+            println!("nothing of ours is in {}", path.display());
+            return Ok(());
+        }
+        let backup = crate::integrate::backup(&path)?;
+        crate::integrate::write(&path, &out)?;
+        println!("removed the board's rows and keybindings");
+        println!("  backup: {}", backup.display());
+        reload_herdr();
+        return Ok(());
+    }
+
+    if !args.apply {
+        println!("{}", path.display());
+        println!("  agent sidebar row   {}", yes_no(status.agents_row));
+        println!("  spaces sidebar row  {}", yes_no(status.spaces_row));
+        println!("  leader keybindings  {}", yes_no(status.keys));
+        if status.complete() {
+            println!("\nall wired up.");
+        } else {
+            println!("\nrun `herdr-code-board configure --apply` to wire it in.");
+            println!("your comments, and other plugins' rows, are left alone.");
+        }
+        return Ok(());
+    }
+
+    let out = crate::integrate::apply(&body)?;
+    if out == body {
+        println!("already wired up; nothing to do");
+        return Ok(());
+    }
+    let backup = crate::integrate::backup(&path)?;
+    crate::integrate::write(&path, &out)?;
+    println!("wired the board into {}", path.display());
+    println!("  backup: {}", backup.display());
+    println!("  prefix+b        open the board");
+    println!("  prefix+shift+b  queue a prompt");
+    println!("  prefix+alt+b    re-import board cards");
+    reload_herdr();
+    Ok(())
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// Config changes only take effect once herdr rereads the file.
+fn reload_herdr() {
+    match CliHerdr::new().call_raw(&["server", "reload-config"]) {
+        Ok(_) => println!("  herdr reloaded its config"),
+        Err(e) => println!("  run `herdr server reload-config` to pick it up ({e})"),
+    }
 }
 
 // ---- cards -----------------------------------------------------------------
@@ -965,6 +1045,35 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
             unmapped.join(", ")
         );
     }
+
+    println!("\nherdr integration");
+    match crate::integrate::config_path().and_then(|p| {
+        let body = std::fs::read_to_string(&p)?;
+        Ok((p, crate::integrate::inspect(&body)))
+    }) {
+        Ok((path, status)) => {
+            println!("  config  {}", path.display());
+            println!("  agent sidebar row   {}", yes_no(status.agents_row));
+            println!("  spaces sidebar row  {}", yes_no(status.spaces_row));
+            println!("  leader keybindings  {}", yes_no(status.keys));
+            if !status.complete() {
+                println!("  run `herdr-code-board configure --apply` to wire it in");
+            }
+        }
+        Err(e) => println!("  could not read herdr's config: {e}"),
+    }
+    println!(
+        "  sidebar publishing  {}",
+        if config.sidebar { "on" } else { "off" }
+    );
+    println!(
+        "  notifications       {}",
+        if config.notifications {
+            config.notify_on.join(", ")
+        } else {
+            "off".into()
+        }
+    );
 
     println!("\nauto answer");
     println!(

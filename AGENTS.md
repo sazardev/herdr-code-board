@@ -137,6 +137,35 @@ with the results. Same for branches (`Request::LoadBranches` → `set_branches`)
 Do not reach for the filesystem from inside `state.rs`; the key handling tests
 depend on it staying pure.
 
+## Writing into herdr's own config
+
+`src/integrate.rs` edits `~/.config/herdr/config.toml` **textually**, never
+through a TOML round-trip. That file is shared: this machine already carries
+herdr-agent-quota's five sidebar rows and the user's own comments, and
+`toml::to_string` would reformat everything and drop every comment. So the code
+finds the byte span of the `rows = …` value by bracket-balancing, splices, and
+leaves the rest of the file alone. Its tests assert on a real config with
+agent-quota's rows in it.
+
+Everything written carries the `herdr-code-board` marker so uninstall can find
+it. `write` refuses output that does not parse, and `apply` backs up first.
+This is never automatic — it is an explicit action, because it is the user's file.
+
+## Publishing to the sidebars
+
+`src/engine/present.rs` is the only thing that calls `report_pane_tokens` /
+`report_workspace_tokens`. Two rules:
+
+1. **Only on change.** The last published set lives in `kv`; equal means no call.
+   A metadata write can repaint a pane, and this plugin runs on every agent state
+   change on the machine — twice per turn, per agent.
+2. **Publish once per invocation**, at the end, not once per effect. `event` and
+   `sweep_once` each call `Executor::present` exactly once.
+
+A target that cannot be written to is dropped from the published set rather than
+retried forever, and one failure never aborts the sweep — panes die, and herdr
+sessions stop.
+
 ## Paths
 
 There is one board per user. Herdr injects `HERDR_PLUGIN_CONFIG_DIR` and

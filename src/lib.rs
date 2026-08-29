@@ -11,6 +11,7 @@ pub mod config;
 pub mod engine;
 pub mod git;
 pub mod herdr;
+pub mod integrate;
 pub mod model;
 pub mod overlay;
 pub mod store;

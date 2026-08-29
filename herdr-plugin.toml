@@ -1,6 +1,6 @@
 id = "herdr-code-board"
 name = "Herdr Code Board"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.8.0"
 description = "Kanban queue for agentic prompts: cards dispatch real agents into herdr panes, worktrees and workspaces, and rules chain one card to the next."
 # Windows is excluded because pane commands go through herdr's native Windows
@@ -23,11 +23,11 @@ command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-boar
 
 [[panes]]
 id = "quick"
-title = "Code Board"
+title = "Queue a prompt"
 placement = "popup"
 width = "80%"
-height = 24
-command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" board"]
+height = 20
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" board --quick"]
 
 [[actions]]
 id = "open"
@@ -38,6 +38,21 @@ command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-boar
 id = "enqueue-here"
 title = "Track this repo on the board"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" repo add"]
+
+[[actions]]
+id = "quick"
+title = "Queue a prompt"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" quick"]
+
+[[actions]]
+id = "configure"
+title = "Wire the board into herdr (sidebar + keys)"
+command = ["sh", "-c", "\"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" configure --apply"]
+
+[[actions]]
+id = "unconfigure"
+title = "Remove the board's sidebar rows and keys"
+command = ["sh", "-c", "\"$HERDR_PLUGIN_ROOT/target/release/herdr-code-board\" configure --uninstall"]
 
 [[actions]]
 id = "sync"

@@ -23,7 +23,18 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Open the kanban TUI. This is the plugin's `board` pane entrypoint.
-    Board,
+    Board {
+        /// Start in one-line capture and exit once the prompt is queued. This is
+        /// what the `quick` popup runs.
+        #[arg(long)]
+        quick: bool,
+    },
+
+    /// Ask herdr for the quick-capture popup. Backs the `prefix+shift+b` binding.
+    Quick,
+
+    /// Wire the board into herdr's config: sidebar rows and leader keybindings.
+    Configure(ConfigureArgs),
 
     /// Run the timer daemon in the foreground.
     Daemon,
@@ -114,6 +125,16 @@ pub enum RepoCommand {
     Ls,
     /// Stop tracking a repository. Its cards become global.
     Rm { repo: String },
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigureArgs {
+    /// Write the changes. Without this, only report what would change.
+    #[arg(long)]
+    pub apply: bool,
+    /// Take back everything the board added.
+    #[arg(long, conflicts_with = "apply")]
+    pub uninstall: bool,
 }
 
 #[derive(Debug, Args)]

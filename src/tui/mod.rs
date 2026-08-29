@@ -53,7 +53,7 @@ fn decode(ev: Event) -> Option<Key> {
     })
 }
 
-pub fn run(paths: &Paths, config: &Config) -> Result<()> {
+pub fn run(paths: &Paths, config: &Config, quick: bool) -> Result<()> {
     let herdr: Arc<dyn HerdrApi> = Arc::new(CliHerdr::new());
     let theme = Theme::from_config(&config.theme);
 
@@ -61,6 +61,9 @@ pub fn run(paths: &Paths, config: &Config) -> Result<()> {
         agents::KINDS.iter().map(|s| s.to_string()).collect(),
         config.default_agent.clone(),
     );
+    if quick {
+        app.start_quick();
+    }
 
     let mut terminal = ratatui::init();
     let result = event_loop(paths, config, herdr, &mut terminal, &mut app, &theme);
@@ -115,6 +118,11 @@ fn event_loop(
 
                 reload(&store, app)?;
                 revision = store.revision()?;
+                // The quick popup exists to capture one prompt and get out of
+                // the way.
+                if app.oneshot && app.mode == state::Mode::Normal {
+                    return Ok(());
+                }
                 continue;
             }
         }

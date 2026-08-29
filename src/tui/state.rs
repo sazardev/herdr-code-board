@@ -248,6 +248,8 @@ pub struct App {
     pub detail: Option<Detail>,
     /// Buffer for the one-line quick add.
     pub quick: String,
+    /// Started as the capture popup: leave as soon as the line is dealt with.
+    pub oneshot: bool,
     /// Set while a scan is in flight, so the board can say so.
     pub scanning: bool,
     /// Selected lane, as an index into [`Column::ALL`].
@@ -275,6 +277,7 @@ impl App {
             chain: None,
             detail: None,
             quick: String::new(),
+            oneshot: false,
             scanning: false,
             lane: 0,
             cursor: [0; Column::ALL.len()],
@@ -283,6 +286,13 @@ impl App {
             status: String::new(),
             pending: None,
         }
+    }
+
+    /// Open straight into one-line capture and close once it is submitted.
+    pub fn start_quick(&mut self) {
+        self.oneshot = true;
+        self.mode = Mode::QuickAdd;
+        self.quick.clear();
     }
 
     pub fn load(&mut self, cards: Vec<Card>, repos: Vec<Repo>) {
@@ -1425,6 +1435,19 @@ mod tests {
         );
         assert_eq!(a.mode, Mode::Normal);
         assert!(a.quick.is_empty(), "the buffer is cleared for next time");
+    }
+
+    #[test]
+    fn the_capture_popup_opens_in_quick_add_and_is_marked_one_shot() {
+        let mut a = app();
+        a.start_quick();
+        assert_eq!(a.mode, Mode::QuickAdd);
+        assert!(a.oneshot);
+        for c in "hi".chars() {
+            a.on_key(Key::Char(c));
+        }
+        assert_eq!(a.on_key(Key::Enter), Request::QuickAdd("hi".into()));
+        assert_eq!(a.mode, Mode::Normal, "the loop closes it from here");
     }
 
     #[test]

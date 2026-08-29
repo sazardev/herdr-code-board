@@ -34,6 +34,8 @@ pub fn sweep_once(paths: &Paths, config: &Config, herdr: Arc<dyn HerdrApi>) -> R
     let mut exec = Executor::new(store, herdr, config.clone());
     exec.tick(now())?;
     exec.dispatch_ready()?;
+    // Once per sweep, after everything settled.
+    exec.present()?;
     Ok(true)
 }
 

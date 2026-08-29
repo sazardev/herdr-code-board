@@ -62,5 +62,41 @@ pub trait HerdrApi: Send + Sync {
         label: Option<&str>,
     ) -> Result<WorkspaceCreated>;
 
-    fn notify(&self, title: &str, body: Option<&str>) -> Result<()>;
+    fn notify(&self, title: &str, body: Option<&str>, sound: Sound) -> Result<()>;
+
+    /// Publish `$name` tokens onto a pane, for herdr's agent sidebar.
+    ///
+    /// Only call this when something actually changed: herdr-agent-quota measured
+    /// that a metadata write can repaint the pane, and the board reacts to every
+    /// agent state change on the machine.
+    fn report_pane_tokens(&self, pane_id: &str, source: &str, tokens: &Tokens) -> Result<()>;
+
+    /// Publish `$name` tokens onto a workspace, for herdr's Spaces sidebar.
+    fn report_workspace_tokens(
+        &self,
+        workspace_id: &str,
+        source: &str,
+        tokens: &Tokens,
+    ) -> Result<()>;
+}
+
+/// Metadata tokens, in publish order. An empty value clears that token.
+pub type Tokens = Vec<(String, String)>;
+
+/// Which of herdr's notification sounds to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sound {
+    None,
+    Done,
+    Request,
+}
+
+impl Sound {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Sound::None => "none",
+            Sound::Done => "done",
+            Sound::Request => "request",
+        }
+    }
 }

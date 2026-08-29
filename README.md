@@ -119,6 +119,49 @@ Error: "nosuch" is not a branch of oxid. Available:
 In the form, `placement = worktree` reveals a **branch** field and a **from**
 chooser listing that repo's actual branches, most recently committed first.
 
+## Inside herdr
+
+Run this once and the board stops being a separate app:
+
+```sh
+herdr-code-board configure --apply
+```
+
+**Leader keys.** `prefix+b` opens the board, `prefix+shift+b` opens a popup that
+takes one line and queues it, `prefix+alt+b` re-imports overlays. They are
+ordinary `[[keys.command]]` bindings, so they show up in herdr's own key help.
+
+**The Agent sidebar.** Every pane a card owns gets the card's name, what it will
+start when it finishes, and its attempt count — beside the agent, where you are
+already looking:
+
+```text
+● Claude/Opus · rustock
+  ▶ Review the diff  → Run the tests
+```
+
+**The Spaces sidebar.** Each workspace shows how much of the board is live in it:
+
+```text
+▣ rustock   main
+  ▶ 2 · ◷ 3
+```
+
+**Notifications.** A card reaching `blocked` or `failed` raises a herdr
+notification with the right sound. Change which lanes interrupt you:
+
+```toml
+notify_on = ["blocked", "failed", "done"]
+notifications = true
+sidebar = true
+```
+
+`configure --apply` edits `~/.config/herdr/config.toml` textually — it appends
+one row to each sidebar and three keybindings, backs the file up first, and
+refuses to write anything herdr could not parse. Your comments and other
+plugins' rows are left byte for byte. `configure` on its own reports what is
+wired; `configure --uninstall` takes back exactly what it added.
+
 ## The board
 
 | Lane | What it means |
@@ -137,6 +180,9 @@ By default a card completes when its agent's turn ends. Pass `--review` (or
 ### Keys
 
 ```
+prefix+b        open the board (after `configure --apply`)
+prefix+shift+b  popup: type one line, it runs
+
 a         quick add — one line, queued immediately
 n         new card, full form
 space     queue / unqueue        Q    queue the whole lane
@@ -341,6 +387,9 @@ daemon           run the timer daemon in the foreground
   the event. With a single session — the normal case — that is invisible. If you
   run several named sessions at once, which one picks up a queued card is not
   determined.
+- **Metadata writes can repaint a pane.** The board publishes tokens only when a
+  value actually changed, and never reads pane scrollback. If you see panes
+  scrolling, `sidebar = false` in `config.toml` turns publishing off.
 - **The CLI is not installed on `PATH` by the plugin.** Herdr only needs the
   binary inside the plugin directory; symlink it yourself if you want the
   commands.

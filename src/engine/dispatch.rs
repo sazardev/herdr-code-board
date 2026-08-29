@@ -10,10 +10,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use super::placement::{self, Target};
+use super::present::Publisher;
 use super::reducer::{self, Effect, Input};
 use crate::agents;
 use crate::config::Config;
-use crate::herdr::HerdrApi;
+use crate::herdr::{HerdrApi, Sound};
 use crate::model::{Action, AgentStatus, Binding, Card, Column, Repo};
 use crate::store::Store;
 
@@ -106,6 +107,7 @@ impl Executor {
                     if self.store.set_lane(&card.id, lane)? {
                         self.store
                             .log_event("lane", Some(&card.id), Some(lane.as_str()))?;
+                        self.announce(card, lane);
                     }
                 }
                 Effect::ClearBinding => self.store.clear_binding(&card.id)?,
@@ -220,7 +222,7 @@ impl Executor {
 
             Action::Notify { title, body } => {
                 if self.config.notifications {
-                    self.herdr.notify(title, body.as_deref())?;
+                    self.herdr.notify(title, body.as_deref(), Sound::Request)?;
                 }
                 Ok(())
             }
@@ -246,6 +248,40 @@ impl Executor {
                 Ok(())
             }
         }
+    }
+
+    /// Raise a herdr notification when a card reaches a lane the user asked to
+    /// hear about. Best effort: a board that cannot toast still works.
+    fn announce(&self, card: &Card, lane: Column) {
+        if !self.config.notifies(lane) {
+            return;
+        }
+        let sound = match lane {
+            Column::Blocked => Sound::Request,
+            Column::Done | Column::Review => Sound::Done,
+            _ => Sound::None,
+        };
+        let title = format!("{} {}", super::present::glyph(lane), card.title);
+        let body = match lane {
+            Column::Blocked => "waiting on an approval dialog".to_string(),
+            Column::Failed => card
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "the card failed".into()),
+            other => format!("moved to {other}"),
+        };
+        let _ = self.herdr.notify(&title, Some(&body), sound);
+    }
+
+    /// Push the board's state into herdr's sidebars.
+    ///
+    /// Called once per invocation, not once per effect: a metadata write can
+    /// repaint a pane, and this plugin runs on every agent state change.
+    pub fn present(&mut self) -> Result<usize> {
+        if !self.config.sidebar {
+            return Ok(0);
+        }
+        Publisher::publish(&self.store, self.herdr.as_ref())
     }
 
     /// Keys that pick the `choice`-th option of an agent dialog.

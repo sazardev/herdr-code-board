@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use anyhow::{bail, Result};
 
 use super::types::*;
-use super::{HerdrApi, WorkspaceCreated};
+use super::{HerdrApi, Sound, Tokens, WorkspaceCreated};
 use crate::model::{AgentStatus, SplitDirection};
 
 #[derive(Debug, Default)]
@@ -377,9 +377,46 @@ impl HerdrApi for FakeHerdr {
         self.create_workspace(&format!("/worktrees/{branch}"), label.unwrap_or(branch))
     }
 
-    fn notify(&self, title: &str, body: Option<&str>) -> Result<()> {
-        self.record(format!("notification show {title} {}", body.unwrap_or("")))
+    fn notify(&self, title: &str, body: Option<&str>, sound: Sound) -> Result<()> {
+        self.record(format!(
+            "notification show {title} {} [{}]",
+            body.unwrap_or(""),
+            sound.as_str()
+        ))
     }
+
+    fn report_pane_tokens(&self, pane_id: &str, source: &str, tokens: &Tokens) -> Result<()> {
+        self.record(format!(
+            "pane report-metadata {pane_id} --source {source} {}",
+            render_tokens(tokens)
+        ))
+    }
+
+    fn report_workspace_tokens(
+        &self,
+        workspace_id: &str,
+        source: &str,
+        tokens: &Tokens,
+    ) -> Result<()> {
+        self.record(format!(
+            "workspace report-metadata {workspace_id} --source {source} {}",
+            render_tokens(tokens)
+        ))
+    }
+}
+
+fn render_tokens(tokens: &Tokens) -> String {
+    tokens
+        .iter()
+        .map(|(k, v)| {
+            if v.is_empty() {
+                format!("-{k}")
+            } else {
+                format!("{k}={v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

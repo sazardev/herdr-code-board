@@ -157,6 +157,11 @@ pub struct Config {
     pub tui_poll_ms: u64,
     /// Desktop/herdr notifications on rule fires and failures.
     pub notifications: bool,
+    /// Lanes worth interrupting you for. A card reaching one of these raises a
+    /// herdr notification. `blocked` and `failed` are the ones that need a human.
+    pub notify_on: Vec<String>,
+    /// Publish card state into herdr's Agent and Spaces sidebars.
+    pub sidebar: bool,
     /// How the `--model` value is passed to each agent CLI.
     pub model_flags: BTreeMap<String, ModelFlag>,
     pub theme: Theme,
@@ -221,6 +226,8 @@ impl Default for Config {
             scan_depth: 4,
             tui_poll_ms: 250,
             notifications: true,
+            notify_on: vec!["blocked".into(), "failed".into()],
+            sidebar: true,
             model_flags: crate::agents::default_model_flags(),
             theme: Theme::default(),
         }
@@ -228,6 +235,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Should a card entering `lane` interrupt the user?
+    pub fn notifies(&self, lane: crate::model::Column) -> bool {
+        self.notifications && self.notify_on.iter().any(|l| l == lane.as_str())
+    }
+
     /// The places [`crate::git::discover`] should look, honouring `scan_roots`.
     pub fn roots(&self) -> Vec<crate::git::ScanRoot> {
         if self.scan_roots.is_empty() {
@@ -275,6 +287,23 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_lanes_that_need_a_human_notify_by_default() {
+        use crate::model::Column;
+        let cfg = Config::default();
+        assert!(cfg.notifies(Column::Blocked));
+        assert!(cfg.notifies(Column::Failed));
+        assert!(!cfg.notifies(Column::Running));
+        assert!(!cfg.notifies(Column::Done));
+
+        // The master switch wins over the per-lane list.
+        let off = Config {
+            notifications: false,
+            ..Config::default()
+        };
+        assert!(!off.notifies(Column::Blocked));
+    }
 
     #[test]
     fn a_leading_tilde_is_expanded() {

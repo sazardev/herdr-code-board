@@ -7,7 +7,7 @@ use super::{from_json, new_id, now, to_json, Store};
 use crate::model::{Binding, Card, Column, Placement};
 
 const SELECT: &str =
-    "SELECT id, key, title, prompt, repo_id, tags, agent_kind, model, extra_args, \
+    "SELECT id, key, title, prompt, repo_id, session, tags, agent_kind, model, extra_args, \
      placement, lane, binding, priority, auto_complete, auto_answer, max_retries, attempts, \
      created_at, updated_at, status_since, dispatched_at, last_error, prompt_sent FROM cards";
 
@@ -18,6 +18,7 @@ fn row_to_card(r: &Row<'_>) -> rusqlite::Result<Card> {
         title: r.get("title")?,
         prompt: r.get("prompt")?,
         repo_id: r.get("repo_id")?,
+        session: r.get("session")?,
         tags: from_json(&r.get::<_, String>("tags")?)?,
         agent_kind: r.get("agent_kind")?,
         model: r.get("model")?,
@@ -55,6 +56,8 @@ pub struct NewCard {
     pub title: String,
     pub prompt: String,
     pub repo_id: Option<String>,
+    /// Which herdr session should run this. Defaults to the one we are in.
+    pub session: Option<String>,
     pub tags: Vec<String>,
     pub agent_kind: String,
     pub model: Option<String>,
@@ -74,6 +77,9 @@ impl NewCard {
             title: title.into(),
             prompt: String::new(),
             repo_id: None,
+            // Claimed for the session we are running in, so another session's
+            // event hook will not start it.
+            session: crate::session::current_name(),
             tags: vec![],
             agent_kind: agent_kind.into(),
             model: None,
@@ -99,6 +105,7 @@ impl Store {
             title: new.title.clone(),
             prompt: new.prompt.clone(),
             repo_id: new.repo_id.clone(),
+            session: new.session.clone(),
             tags: new.tags.clone(),
             agent_kind: new.agent_kind.clone(),
             model: new.model.clone(),
@@ -124,11 +131,11 @@ impl Store {
 
     fn insert_card(&self, c: &Card) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO cards (id, key, title, prompt, repo_id, tags, agent_kind, model,
+            "INSERT INTO cards (id, key, title, prompt, repo_id, session, tags, agent_kind, model,
                 extra_args, placement, lane, binding, priority, auto_complete, auto_answer,
                 max_retries, attempts, created_at, updated_at, status_since, dispatched_at,
                 last_error, prompt_sent)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+             VALUES (?1,?2,?3,?4,?5,?24,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
             params![
                 c.id,
                 c.key,
@@ -153,6 +160,7 @@ impl Store {
                 c.dispatched_at,
                 c.last_error,
                 c.prompt_sent,
+                c.session,
             ],
         )?;
         Ok(())
@@ -163,6 +171,7 @@ impl Store {
     pub fn update_card(&self, c: &Card) -> Result<()> {
         let n = self.conn().execute(
             "UPDATE cards SET key=?2, title=?3, prompt=?4, repo_id=?5, tags=?6, agent_kind=?7,
+                session=?23,
                 model=?8, extra_args=?9, placement=?10, lane=?11, binding=?12, priority=?13,
                 auto_complete=?14, auto_answer=?15, max_retries=?16, attempts=?17,
                 updated_at=?18, status_since=?19, dispatched_at=?20, last_error=?21,
@@ -191,6 +200,7 @@ impl Store {
                 c.dispatched_at,
                 c.last_error,
                 c.prompt_sent,
+                c.session,
             ],
         )?;
         if n == 0 {

@@ -224,6 +224,7 @@ mod tests {
             title: "review".into(),
             prompt: "look at the diff".into(),
             repo_id: None,
+            session: None,
             tags: vec![],
             agent_kind: "claude".into(),
             model: None,

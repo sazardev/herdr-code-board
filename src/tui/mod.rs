@@ -354,6 +354,7 @@ fn execute(
                     title: format!("{} copy", card.title),
                     prompt: card.prompt.clone(),
                     repo_id: card.repo_id.clone(),
+                    session: card.session.clone(),
                     tags: card.tags.clone(),
                     agent_kind: card.agent_kind.clone(),
                     model: card.model.clone(),

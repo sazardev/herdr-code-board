@@ -15,6 +15,7 @@ fn card(id: &str, title: &str, column: Column) -> Card {
         title: title.into(),
         prompt: "a prompt that is reasonably long so wrapping matters".repeat(3),
         repo_id: Some("R1".into()),
+        session: None,
         tags: vec!["urgent".into()],
         agent_kind: "claude".into(),
         model: Some("opus".into()),

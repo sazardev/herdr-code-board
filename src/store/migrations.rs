@@ -87,6 +87,12 @@ const MIGRATIONS: &[&str] = &[
         v TEXT NOT NULL
     );
     "#,
+    // v2 — which herdr session a card belongs to. NULL means unclaimed: any
+    // session may run it, which is what every single-session board looks like.
+    r#"
+    ALTER TABLE cards ADD COLUMN session TEXT;
+    CREATE INDEX cards_session ON cards(session);
+    "#,
 ];
 
 pub fn apply(conn: &Connection) -> Result<()> {
@@ -111,4 +117,71 @@ pub fn apply(conn: &Connection) -> Result<()> {
 /// The schema version this build produces.
 pub fn latest_version() -> usize {
     MIGRATIONS.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Upgrading an existing board must keep every card. A user who installs a
+    /// new version has a database full of work in progress.
+    #[test]
+    fn upgrading_a_v1_database_keeps_its_cards() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute(
+            "INSERT INTO cards (id, title, prompt, agent_kind, placement, lane,
+                created_at, updated_at, status_since)
+             VALUES ('OLD', 'from before', 'p', 'claude', '{\"kind\":\"reuse\"}',
+                     'running', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        apply(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version as usize, latest_version());
+
+        let (title, session): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, session FROM cards WHERE id = 'OLD'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "from before");
+        assert_eq!(
+            session, None,
+            "a card from before sessions existed is unclaimed, so any session may run it"
+        );
+    }
+
+    #[test]
+    fn applying_from_scratch_reaches_the_same_place_as_upgrading() {
+        let fresh = Connection::open_in_memory().unwrap();
+        apply(&fresh).unwrap();
+
+        let stepwise = Connection::open_in_memory().unwrap();
+        stepwise.execute_batch(MIGRATIONS[0]).unwrap();
+        stepwise.pragma_update(None, "user_version", 1i64).unwrap();
+        apply(&stepwise).unwrap();
+
+        let columns = |c: &Connection| -> Vec<String> {
+            let mut stmt = c
+                .prepare("SELECT name FROM pragma_table_info('cards')")
+                .unwrap();
+            let mut out: Vec<String> = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            out.sort();
+            out
+        };
+        assert_eq!(columns(&fresh), columns(&stepwise));
+    }
 }

@@ -81,6 +81,24 @@ log. `tests/engine_lifecycle.rs` runs the full lifecycle against it.
 - **Auto-answer needs two switches.** `config.allow_auto_answer` *and*
   `card.auto_answer`. Do not collapse them, and do not add a third way in.
 
+## Sessions
+
+Herdr can run several servers at once, each behind its own socket, and a plugin
+event hook inherits whichever one fired it. The board is a single database
+across all of them, so `dispatch_ready` must not simply start whatever is ready:
+it groups by `cards.session` and starts each group against that session's own
+server, via `HerdrApi::for_session`.
+
+`session::Directory` is a closure so a sweep reads the session list once instead
+of shelling out per card, and so `tests/sessions.rs` can describe a
+multi-session machine without needing one. `FakeHerdr::for_session` returns a
+view sharing the same state, tagging its call log with the socket — that tag is
+how the tests prove a card went to the right place.
+
+A `NULL` session means unclaimed: any session may run it. Every card on a
+single-session board and every overlay-imported card is in that state, so do not
+make it mean anything stronger.
+
 ## Two ordering and lifecycle traps
 
 **Never order cards by `id`.** A ULID sorts by time across milliseconds only;

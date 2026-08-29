@@ -27,9 +27,12 @@ struct State {
     seq: u32,
 }
 
-#[derive(Debug, Default)]
+/// Shared so `for_session` can hand back a view of the same pretend herdr,
+/// tagged with which session's socket the caller aimed at.
+#[derive(Debug, Default, Clone)]
 pub struct FakeHerdr {
-    state: Mutex<State>,
+    state: std::sync::Arc<Mutex<State>>,
+    session: Option<String>,
 }
 
 impl FakeHerdr {
@@ -113,6 +116,10 @@ impl FakeHerdr {
     }
 
     fn record(&self, call: String) -> Result<()> {
+        let call = match &self.session {
+            Some(socket) => format!("[{socket}] {call}"),
+            None => call,
+        };
         let mut s = self.state.lock().unwrap();
         if let Some((_, msg)) = s.failures.iter().find(|(n, _)| call.contains(n.as_str())) {
             let msg = msg.clone();
@@ -125,6 +132,13 @@ impl FakeHerdr {
 }
 
 impl HerdrApi for FakeHerdr {
+    fn for_session(&self, socket: &std::path::Path) -> Option<std::sync::Arc<dyn HerdrApi>> {
+        Some(std::sync::Arc::new(FakeHerdr {
+            state: self.state.clone(),
+            session: Some(socket.display().to_string()),
+        }))
+    }
+
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         self.record("workspace list".into())?;
         Ok(self.state.lock().unwrap().workspaces.clone())

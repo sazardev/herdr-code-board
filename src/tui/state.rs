@@ -241,6 +241,9 @@ pub struct App {
     pub repos: Vec<Repo>,
     pub agents: Vec<String>,
     pub default_agent: String,
+    /// The herdr session this board is running in, if any. Cards belonging to
+    /// another one are marked, because they will not start here.
+    pub session: Option<String>,
     pub mode: Mode,
     pub form: Option<Form>,
     pub picker: Option<Picker>,
@@ -271,6 +274,7 @@ impl App {
             repos: Vec::new(),
             agents,
             default_agent,
+            session: crate::session::current_name(),
             mode: Mode::Normal,
             form: None,
             picker: None,
@@ -359,6 +363,15 @@ impl App {
         let lane = self.current_lane();
         let cards = self.lane_cards(lane);
         cards.get(self.cursor[self.lane]).copied()
+    }
+
+    /// The session a card will run in, when that is not the one you are in.
+    pub fn foreign_session<'c>(&self, card: &'c Card) -> Option<&'c str> {
+        let want = card.session.as_deref()?;
+        if Some(want) == self.session.as_deref() {
+            return None;
+        }
+        Some(want)
     }
 
     pub fn repo_name(&self, card: &Card) -> &str {
@@ -1020,6 +1033,7 @@ mod tests {
             title: title.into(),
             prompt: String::new(),
             repo_id: None,
+            session: None,
             tags: vec![],
             agent_kind: "claude".into(),
             model: None,

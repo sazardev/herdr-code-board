@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0
+
+**Cards run in the session that queued them.**
+
+The board is one database per user, but herdr can run several sessions at once
+and an event hook inherits whichever one fired it. So a card queued while you
+worked in one session could be started in another — whichever session's hook
+swept first. It was the last known nondeterminism in the plugin.
+
+A card now records its session (schema v2; existing cards upgrade to
+"unclaimed", which any session may run). Dispatch groups ready cards by session
+and starts each group against that session's own server. A card whose session is
+stopped waits, with the reason on the card, and goes as soon as it is back — it
+is never started somewhere you were not looking.
+
+Verified with two live herdr sessions: a card queued in one, swept from the
+other, opened its pane in the session it belonged to and left the other
+untouched.
+
+The board and `ls` mark cards belonging to another session with `@name`, and
+`doctor` breaks the board down per session when there is more than one.
+
 ## 0.5.3
 
 - `configure --apply` claims the daemon before checking the config, not after.

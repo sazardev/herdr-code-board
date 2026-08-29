@@ -352,6 +352,7 @@ fn add(paths: &Paths, config: &Config, args: AddArgs, cwd: Option<PathBuf>) -> R
         title: args.title.clone(),
         prompt: args.resolve_prompt()?,
         repo_id: repo.as_ref().map(|r| r.id.clone()),
+        session: crate::session::current_name(),
         tags: args.tags.clone(),
         agent_kind,
         model: args
@@ -514,6 +515,7 @@ fn list(paths: &Paths, args: LsArgs) -> Result<()> {
         println!("no cards");
         return Ok(());
     }
+    let here = crate::session::current_name();
     for card in cards {
         let repo = card
             .repo_id
@@ -521,8 +523,13 @@ fn list(paths: &Paths, args: LsArgs) -> Result<()> {
             .and_then(|id| repos.iter().find(|r| &r.id == id))
             .map(|r| r.name.as_str())
             .unwrap_or("-");
+        // Only worth the column when the board spans more than one session.
+        let session = match card.session.as_deref() {
+            Some(s) if Some(s) != here.as_deref() => format!("@{s} "),
+            _ => String::new(),
+        };
         println!(
-            "{:<10} {:<9} {:<12} {:<10} {}",
+            "{:<10} {:<9} {:<12} {:<10} {session}{}",
             &card.id[card.id.len().saturating_sub(8)..],
             card.column.as_str(),
             repo,
@@ -1102,6 +1109,34 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
             agents::FALLBACK_MODEL_FLAG,
             unmapped.join(", ")
         );
+    }
+
+    println!("\nsessions");
+    match crate::session::current_name() {
+        Some(name) => println!("  this process is in {name}"),
+        None => println!("  not inside a herdr session; cards created here are unclaimed"),
+    }
+    {
+        let sessions = crate::session::herdr_directory()();
+        if sessions.len() > 1 {
+            let store = store_of(paths)?;
+            let cards = store.list_cards()?;
+            for s in &sessions {
+                let mine = cards
+                    .iter()
+                    .filter(|c| c.session.as_deref() == Some(&s.name))
+                    .count();
+                println!(
+                    "  {:<16} {:<9} {mine} card(s)",
+                    s.name,
+                    if s.running { "running" } else { "stopped" }
+                );
+            }
+            let unclaimed = cards.iter().filter(|c| c.session.is_none()).count();
+            if unclaimed > 0 {
+                println!("  {:<16} {:<9} {unclaimed} card(s)", "(unclaimed)", "any");
+            }
+        }
     }
 
     println!("\nherdr integration");

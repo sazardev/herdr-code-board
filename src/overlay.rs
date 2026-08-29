@@ -335,6 +335,9 @@ pub fn sync_repo(store: &Store, repo_path: &Path, default_agent: &str) -> Result
                     title,
                     prompt: section.prompt.clone(),
                     repo_id: Some(repo.id.clone()),
+                    // Overlay cards are definitions, not queued work: they are
+                    // claimed by whichever session first runs them.
+                    session: None,
                     tags: section.tags.clone(),
                     agent_kind,
                     model,

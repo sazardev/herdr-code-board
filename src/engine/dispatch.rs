@@ -22,10 +22,23 @@ use crate::store::Store;
 /// name stays usable, so it is not a dispatch failure.
 const AGENT_NOT_READY: &str = "agent_not_ready";
 
+/// Where a ready card should be started.
+enum Route {
+    /// With the API this executor already holds.
+    Here,
+    /// Against another herdr session's server.
+    Elsewhere(Arc<dyn HerdrApi>),
+    /// Not at all right now — that session is not up.
+    NotNow,
+}
+
 pub struct Executor {
     pub store: Store,
     pub herdr: Arc<dyn HerdrApi>,
     pub config: Config,
+    /// How to find herdr's other sessions. Swappable so tests can describe a
+    /// multi-session machine.
+    pub sessions: crate::session::Directory,
 }
 
 impl Executor {
@@ -34,7 +47,14 @@ impl Executor {
             store,
             herdr,
             config,
+            sessions: crate::session::herdr_directory(),
         }
+    }
+
+    /// Replace the session directory. Used by tests.
+    pub fn with_sessions(mut self, sessions: crate::session::Directory) -> Self {
+        self.sessions = sessions;
+        self
     }
 
     // ---- inputs -----------------------------------------------------------
@@ -355,22 +375,89 @@ impl Executor {
 
     /// Start every `ready` card that fits within its repo's concurrency budget.
     /// Returns how many were dispatched.
+    ///
+    /// Cards are grouped by the herdr session that queued them, and each group is
+    /// started against that session's own server. Without this, whichever
+    /// session's event hook swept first would take the card, and where your work
+    /// ran would depend on which pane happened to change state.
     pub fn dispatch_ready(&mut self) -> Result<usize> {
         let ready = self.store.cards_in(Column::Ready)?;
+        let here = crate::session::current_name();
+        // Read the session list once per sweep, not once per card.
+        let known = if ready.iter().any(|c| c.session.is_some()) {
+            (self.sessions)()
+        } else {
+            Vec::new()
+        };
         let mut started = 0;
+
         for card in ready {
             if !self.has_capacity(&card)? {
                 continue;
             }
-            match self.dispatch(&card) {
+            let target = match self.route(&card, here.as_deref(), &known)? {
+                Route::Here => None,
+                Route::Elsewhere(api) => Some(api),
+                Route::NotNow => continue,
+            };
+            let previous = target.map(|api| std::mem::replace(&mut self.herdr, api));
+            let result = self.dispatch(&card);
+            if let Some(previous) = previous {
+                self.herdr = previous;
+            }
+            match result {
                 Ok(true) => started += 1,
                 Ok(false) => {}
-                Err(e) => {
-                    self.fail_card(&card, &format!("{e:#}"))?;
-                }
+                Err(e) => self.fail_card(&card, &format!("{e:#}"))?,
             }
         }
         Ok(started)
+    }
+
+    /// Decide which herdr server should start this card.
+    fn route(
+        &mut self,
+        card: &Card,
+        here: Option<&str>,
+        known: &[crate::session::Session],
+    ) -> Result<Route> {
+        // Unclaimed, or ours: start it with the API we already have. This is
+        // every card on a single-session board.
+        let Some(want) = card.session.as_deref() else {
+            return Ok(Route::Here);
+        };
+        if Some(want) == here {
+            return Ok(Route::Here);
+        }
+
+        let Some(found) = known.iter().find(|s| s.name == want) else {
+            // Say it once rather than failing the card on every sweep forever.
+            self.note_waiting(card, &format!("herdr session {want:?} does not exist"))?;
+            return Ok(Route::NotNow);
+        };
+        if !found.running {
+            self.note_waiting(
+                card,
+                &format!("waiting for herdr session {want:?} to start"),
+            )?;
+            return Ok(Route::NotNow);
+        }
+        match self.herdr.for_session(&found.socket_path) {
+            Some(api) => Ok(Route::Elsewhere(api)),
+            // An implementation that cannot address sessions has only one.
+            None => Ok(Route::Here),
+        }
+    }
+
+    /// Record why a card is sitting in `ready`, without repeating it every sweep.
+    fn note_waiting(&mut self, card: &Card, reason: &str) -> Result<()> {
+        if card.last_error.as_deref() == Some(reason) {
+            return Ok(());
+        }
+        self.store.set_error(&card.id, Some(reason))?;
+        self.store
+            .log_event("waiting_for_session", Some(&card.id), Some(reason))?;
+        Ok(())
     }
 
     fn budget_for(&self, repo: Option<&Repo>) -> u32 {

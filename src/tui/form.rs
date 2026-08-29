@@ -335,6 +335,7 @@ impl Form {
             title: title.to_string(),
             prompt: self.prompt.clone(),
             repo_id: self.repo_id(),
+            session: crate::session::current_name(),
             tags: Self::split_list(&self.tags),
             agent_kind: self.agent_kind(),
             model: Some(self.model.trim().to_string()).filter(|m| !m.is_empty()),

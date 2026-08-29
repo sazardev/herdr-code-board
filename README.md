@@ -385,13 +385,24 @@ doctor           check herdr, the database, the daemon and the model flags
 daemon           run the timer daemon in the foreground
 ```
 
+## Several herdr sessions
+
+The board is one database for your user, but herdr can run several sessions at
+once, each its own server. A card records the session it was queued from and
+only that session runs it — so work you queue while in one session starts there,
+whichever session's event hook happens to sweep first.
+
+```text
+ZAYKEQ38   ready   mr   claude   @board-b  soy de board-b
+```
+
+If that session is stopped, the card waits and says so rather than starting
+somewhere you were not looking; it goes as soon as the session is back. A card
+queued from outside herdr belongs to no session and any session may take it,
+which is what a single-session board looks like from top to bottom.
+
 ## Known limitations
 
-- **The board is global; herdr sessions are not.** Cards live in one database
-  for your user, but an event hook dispatches into whichever herdr session fired
-  the event. With a single session — the normal case — that is invisible. If you
-  run several named sessions at once, which one picks up a queued card is not
-  determined.
 - **A card can only be dispatched `max_dispatches` times (25 by default).** Rules
   can form a cycle — A queues B, B queues A — and every pass is a real agent
   burning real quota. When a card hits the ceiling it stops in `failed` and says

@@ -220,6 +220,9 @@ pub struct Card {
     pub title: String,
     pub prompt: String,
     pub repo_id: Option<String>,
+    /// The herdr session this card was queued from, and the only one that will
+    /// run it. `None` means unclaimed — any session may take it.
+    pub session: Option<String>,
     pub tags: Vec<String>,
     pub agent_kind: String,
     pub model: Option<String>,
@@ -454,6 +457,7 @@ mod tests {
             title: title.into(),
             prompt: String::new(),
             repo_id: None,
+            session: None,
             tags: vec![],
             agent_kind: "claude".into(),
             model: None,

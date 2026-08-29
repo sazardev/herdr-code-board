@@ -152,6 +152,12 @@ fn draw_lanes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                         Style::default().fg(theme.muted),
                     ));
                 }
+                if let Some(session) = app.foreign_session(card) {
+                    meta.push(Span::styled(
+                        format!(" · @{session}"),
+                        Style::default().fg(theme.waiting),
+                    ));
+                }
                 lines.push(Line::from(meta));
                 ListItem::new(lines)
             })
@@ -213,6 +219,12 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         meta.push(Span::styled(
             format!(" · {pane}"),
             Style::default().fg(theme.accent),
+        ));
+    }
+    if let Some(session) = app.foreign_session(card) {
+        meta.push(Span::styled(
+            format!(" · runs in session {session}"),
+            Style::default().fg(theme.waiting),
         ));
     }
     if card.attempts > 0 {

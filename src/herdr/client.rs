@@ -18,6 +18,9 @@ use crate::model::SplitDirection;
 
 pub struct CliHerdr {
     bin: OsString,
+    /// Overrides `HERDR_SOCKET_PATH` for the commands we spawn, so one process
+    /// can talk to more than one herdr session.
+    socket: Option<std::path::PathBuf>,
 }
 
 impl Default for CliHerdr {
@@ -30,6 +33,15 @@ impl CliHerdr {
     pub fn new() -> Self {
         Self {
             bin: env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| OsString::from("herdr")),
+            socket: None,
+        }
+    }
+
+    /// Talk to the herdr server behind `socket` instead of the ambient one.
+    pub fn at_socket(socket: &std::path::Path) -> Self {
+        Self {
+            socket: Some(socket.to_path_buf()),
+            ..Self::new()
         }
     }
 
@@ -39,12 +51,14 @@ impl CliHerdr {
 
     /// Run a herdr subcommand and return the raw `result` object.
     pub fn call_raw(&self, args: &[&str]) -> Result<serde_json::Value> {
-        let out = Command::new(&self.bin)
-            .args(args)
-            .output()
-            .with_context(|| {
-                format!("running {} {}", self.bin.to_string_lossy(), args.join(" "))
-            })?;
+        let mut command = Command::new(&self.bin);
+        command.args(args);
+        if let Some(socket) = &self.socket {
+            command.env("HERDR_SOCKET_PATH", socket);
+        }
+        let out = command.output().with_context(|| {
+            format!("running {} {}", self.bin.to_string_lossy(), args.join(" "))
+        })?;
 
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -120,6 +134,10 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 impl HerdrApi for CliHerdr {
+    fn for_session(&self, socket: &std::path::Path) -> Option<std::sync::Arc<dyn HerdrApi>> {
+        Some(std::sync::Arc::new(CliHerdr::at_socket(socket)))
+    }
+
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         self.call(&["workspace", "list"], "workspaces")
     }

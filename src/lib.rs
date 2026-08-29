@@ -14,5 +14,6 @@ pub mod herdr;
 pub mod integrate;
 pub mod model;
 pub mod overlay;
+pub mod session;
 pub mod store;
 pub mod tui;

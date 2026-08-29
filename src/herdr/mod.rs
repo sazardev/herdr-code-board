@@ -23,6 +23,18 @@ pub struct WorkspaceCreated {
 }
 
 pub trait HerdrApi: Send + Sync {
+    /// An API aimed at another herdr session's server.
+    ///
+    /// The board is one database but herdr can run several sessions, each behind
+    /// its own socket. Dispatch uses this so a card queued in one session is
+    /// started there and nowhere else, whichever session's hook happens to run.
+    ///
+    /// `None` from an implementation that cannot address sessions; the caller
+    /// then falls back to itself.
+    fn for_session(&self, _socket: &std::path::Path) -> Option<std::sync::Arc<dyn HerdrApi>> {
+        None
+    }
+
     fn workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
     fn create_workspace(&self, cwd: &str, label: &str) -> Result<WorkspaceCreated>;
 

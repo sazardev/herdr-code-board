@@ -101,6 +101,7 @@ fn event_loop(
                 if request == Request::Quit {
                     return Ok(());
                 }
+                let mutating = request != Request::None;
 
                 // Editing leaves the terminal to `$EDITOR` and comes back.
                 if let Request::EditPrompt(card_id) = &request {
@@ -116,8 +117,12 @@ fn event_loop(
                     app.status = format!("{e:#}");
                 }
 
-                reload(&store, app)?;
-                revision = store.revision()?;
+                // Navigation changes nothing on disk, and re-reading every card
+                // for a `j` is pure waste at any real board size.
+                if mutating {
+                    reload(&store, app)?;
+                    revision = store.revision()?;
+                }
                 // The quick popup exists to capture one prompt and get out of
                 // the way.
                 if app.oneshot && app.mode == state::Mode::Normal {
@@ -215,6 +220,7 @@ fn execute(
         Request::Retry { card_id } => {
             store.clear_binding(&card_id)?;
             store.reset_rule_fires(&card_id)?;
+            store.reset_attempts(&card_id)?;
             store.set_error(&card_id, None)?;
             store.set_lane(&card_id, Column::Ready)?;
             sweep(paths, config, herdr, app);

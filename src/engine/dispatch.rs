@@ -180,6 +180,9 @@ impl Executor {
                                 Some("already running"),
                             )?;
                         }
+                        Some(next) if self.over_budget(&next) => {
+                            self.budget_exhausted(&next)?;
+                        }
                         Some(next) => {
                             self.store.reset_rule_fires(&next.id)?;
                             self.store.set_lane(&next.id, Column::Ready)?;
@@ -402,7 +405,40 @@ impl Executor {
         Ok((home, "board".into()))
     }
 
+    /// Has this card already been started as many times as it is ever allowed?
+    fn over_budget(&self, card: &Card) -> bool {
+        self.config.max_dispatches > 0 && card.attempts >= self.config.max_dispatches
+    }
+
+    /// Stop a card that has burned its dispatch budget, and say so loudly. This
+    /// is what a rule cycle looks like from the inside.
+    fn budget_exhausted(&mut self, card: &Card) -> Result<()> {
+        let reason = format!(
+            "dispatched {} times, the max_dispatches limit; if this is a rule cycle, \
+             break it — `retry` clears the count",
+            card.attempts
+        );
+        self.store.set_error(&card.id, Some(&reason))?;
+        self.store.clear_binding(&card.id)?;
+        self.store.set_lane(&card.id, Column::Failed)?;
+        self.store
+            .log_event("dispatch_budget_exhausted", Some(&card.id), Some(&reason))?;
+        let _ = self.herdr.notify(
+            &format!("✗ {}", card.title),
+            Some("stopped: dispatch limit reached"),
+            Sound::Request,
+        );
+        Ok(())
+    }
+
     fn dispatch(&mut self, card: &Card) -> Result<bool> {
+        // The last line of defence. A cycle of rules would otherwise keep
+        // starting real agents until someone noticed.
+        if self.over_budget(card) {
+            self.budget_exhausted(card)?;
+            return Ok(false);
+        }
+
         let (repo_path, repo_name) = self.repo_context(card)?;
         let slug = card.slug();
 

@@ -37,11 +37,79 @@ pub struct Status {
     pub agents_row: bool,
     pub spaces_row: bool,
     pub keys: bool,
+    pub cli_on_path: bool,
 }
 
 impl Status {
     pub fn complete(&self) -> bool {
-        self.agents_row && self.spaces_row && self.keys
+        self.agents_row && self.spaces_row && self.keys && self.cli_on_path
+    }
+}
+
+/// Where a `herdr plugin install` leaves nothing you can type.
+///
+/// Herdr only needs the binary inside the plugin directory, so after installing
+/// from GitHub there is no `herdr-code-board` on `PATH` and nothing says where
+/// it went. Linking it is part of wiring the plugin in.
+pub fn cli_link_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join(".local/bin").join(MARKER))
+}
+
+/// The binary we are running from, resolved through symlinks.
+fn our_binary() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.canonicalize().ok()
+}
+
+fn cli_is_linked() -> bool {
+    let (Some(link), Some(me)) = (cli_link_path(), our_binary()) else {
+        return false;
+    };
+    link.canonicalize().map(|t| t == me).unwrap_or(false)
+}
+
+/// Put the CLI on `PATH`, without clobbering someone else's file.
+pub fn link_cli() -> Result<PathBuf> {
+    let link = cli_link_path().context("$HOME is not set")?;
+    let me = our_binary().context("cannot resolve our own path")?;
+
+    if let Some(dir) = link.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    if link.exists() {
+        let existing = link.canonicalize().unwrap_or_else(|_| link.clone());
+        if existing != me && !link.is_symlink() {
+            bail!(
+                "{} already exists and is not ours; move it aside first",
+                link.display()
+            );
+        }
+        std::fs::remove_file(&link).ok();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&me, &link)
+        .with_context(|| format!("linking {} -> {}", link.display(), me.display()))?;
+    Ok(link)
+}
+
+/// Remove the link, but only if it still points at us.
+pub fn unlink_cli() -> Option<PathBuf> {
+    let link = cli_link_path()?;
+    if !cli_is_linked() {
+        return None;
+    }
+    std::fs::remove_file(&link).ok()?;
+    Some(link)
+}
+
+/// Read herdr's config, treating a file that does not exist yet as empty.
+/// A fresh herdr may not have written one, and that is not a reason to refuse
+/// to wire the plugin in.
+pub fn read_config(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(body) => Ok(body),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
@@ -59,6 +127,7 @@ pub fn inspect(body: &str) -> Status {
         agents_row: rows_contain(body, "ui.sidebar.agents", "$board_card"),
         spaces_row: rows_contain(body, "ui.sidebar.spaces", "$board_space"),
         keys: body.contains(&format!("\"{MARKER}.")),
+        cli_on_path: cli_is_linked(),
     }
 }
 
@@ -310,20 +379,26 @@ fn drop_keys(body: &str) -> String {
 // ---------------------------------------------------------------- file io
 
 /// Back the config up before touching it, and return where the copy went.
-pub fn backup(path: &Path) -> Result<PathBuf> {
+pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let to = path.with_extension(format!("toml.bak-{stamp}"));
     std::fs::copy(path, &to).with_context(|| format!("backing up {}", path.display()))?;
-    Ok(to)
+    Ok(Some(to))
 }
 
 /// Rewrite the config, refusing to write anything herdr could not parse.
 pub fn write(path: &Path, body: &str) -> Result<()> {
     if let Err(e) = body.parse::<toml::Table>() {
         bail!("refusing to write a config herdr could not parse: {e}");
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
 }
@@ -412,9 +487,25 @@ description = "refresh all agent quotas"
 
     #[test]
     fn inspect_reports_what_is_wired_up() {
-        assert_eq!(inspect(REAL), Status::default());
+        let before = inspect(REAL);
+        assert!(!before.agents_row && !before.spaces_row && !before.keys);
         let done = inspect(&apply(REAL).unwrap());
-        assert!(done.complete());
+        assert!(done.agents_row && done.spaces_row && done.keys);
+    }
+
+    #[test]
+    fn a_config_that_does_not_exist_yet_reads_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr/config.toml");
+        assert_eq!(read_config(&path).unwrap(), "");
+        assert!(backup(&path).unwrap().is_none());
+
+        // And wiring in still works, creating the directory on the way.
+        let out = apply(&read_config(&path).unwrap()).unwrap();
+        write(&path, &out).unwrap();
+        assert!(path.exists());
+        let back = inspect(&read_config(&path).unwrap());
+        assert!(back.agents_row && back.spaces_row && back.keys);
     }
 
     #[test]
@@ -422,7 +513,8 @@ description = "refresh all agent quotas"
         let bare = "agent_panel_sort = \"spaces\"\n";
         let out = apply(bare).unwrap();
         out.parse::<toml::Table>().unwrap();
-        assert!(inspect(&out).complete());
+        let st = inspect(&out);
+        assert!(st.agents_row && st.spaces_row && st.keys);
         assert!(!uninstall(&out).unwrap().contains("$board_"));
     }
 

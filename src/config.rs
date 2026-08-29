@@ -146,6 +146,12 @@ pub struct Config {
     pub default_agent: String,
     /// Default cards live at once, per repo, when the repo does not override it.
     pub default_max_parallel: u32,
+    /// Hard ceiling on how many times one card may ever be dispatched.
+    ///
+    /// Rules can form a cycle — A queues B, B queues A — and nothing else stops
+    /// that: each pass is a real agent in a real pane. This is the backstop.
+    /// `herdr-code-board retry` clears a card's count deliberately.
+    pub max_dispatches: u32,
     /// Seconds between engine sweeps when nothing else wakes it.
     pub engine_tick_seconds: u64,
     /// Where to look for repositories. Empty means "your home directory, plus
@@ -221,6 +227,7 @@ impl Default for Config {
             allow_auto_answer: false,
             default_agent: "claude".into(),
             default_max_parallel: 2,
+            max_dispatches: 25,
             engine_tick_seconds: 30,
             scan_roots: Vec::new(),
             scan_depth: 4,

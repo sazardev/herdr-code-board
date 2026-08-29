@@ -191,20 +191,23 @@ fn open_board() -> Result<()> {
 /// config herdr could not parse.
 fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
     let path = crate::integrate::config_path()?;
-    let body =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let body = crate::integrate::read_config(&path)?;
     let status = crate::integrate::inspect(&body);
 
     if args.uninstall {
+        if let Some(link) = crate::integrate::unlink_cli() {
+            println!("unlinked {}", link.display());
+        }
         let out = crate::integrate::uninstall(&body)?;
         if out == body {
             println!("nothing of ours is in {}", path.display());
             return Ok(());
         }
-        let backup = crate::integrate::backup(&path)?;
+        if let Some(backup) = crate::integrate::backup(&path)? {
+            println!("  backup: {}", backup.display());
+        }
         crate::integrate::write(&path, &out)?;
         println!("removed the board's rows and keybindings");
-        println!("  backup: {}", backup.display());
         reload_herdr();
         return Ok(());
     }
@@ -214,6 +217,13 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
         println!("  agent sidebar row   {}", yes_no(status.agents_row));
         println!("  spaces sidebar row  {}", yes_no(status.spaces_row));
         println!("  leader keybindings  {}", yes_no(status.keys));
+        println!(
+            "  cli on PATH         {} ({})",
+            yes_no(status.cli_on_path),
+            crate::integrate::cli_link_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "no $HOME".into())
+        );
         if status.complete() {
             println!("\nall wired up.");
         } else {
@@ -223,15 +233,23 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Put the CLI somewhere typeable. After `herdr plugin install` the binary
+    // lives inside herdr's managed checkout, and nothing is on PATH.
+    match crate::integrate::link_cli() {
+        Ok(link) => println!("linked {}", link.display()),
+        Err(e) => println!("could not put the cli on PATH: {e}"),
+    }
+
     let out = crate::integrate::apply(&body)?;
     if out == body {
-        println!("already wired up; nothing to do");
+        println!("config already wired up");
         return Ok(());
     }
-    let backup = crate::integrate::backup(&path)?;
+    if let Some(backup) = crate::integrate::backup(&path)? {
+        println!("  backup: {}", backup.display());
+    }
     crate::integrate::write(&path, &out)?;
     println!("wired the board into {}", path.display());
-    println!("  backup: {}", backup.display());
     println!("  prefix+b        open the board");
     println!("  prefix+shift+b  queue a prompt");
     println!("  prefix+alt+b    re-import board cards");
@@ -361,6 +379,35 @@ fn add(paths: &Paths, config: &Config, args: AddArgs, cwd: Option<PathBuf>) -> R
     }
     if args.start {
         dispatch_now(paths, config)?;
+        report_outcome(paths, &card.id)?;
+    }
+    Ok(())
+}
+
+/// After asking for a dispatch, say what actually became of the card. Printing
+/// `[ready]` and then silently failing is how you lose ten minutes.
+fn report_outcome(paths: &Paths, card_id: &str) -> Result<()> {
+    let store = store_of(paths)?;
+    let Some(card) = store.get_card(card_id)? else {
+        return Ok(());
+    };
+    match card.column {
+        Column::Ready => println!("  still queued — no free slot in this repo yet"),
+        Column::Failed => {
+            println!(
+                "  FAILED: {}",
+                card.last_error.as_deref().unwrap_or("no detail")
+            );
+        }
+        lane => {
+            let where_ = card
+                .binding
+                .pane_id
+                .as_deref()
+                .map(|p| format!(" in {p}"))
+                .unwrap_or_default();
+            println!("  {lane}{where_}");
+        }
     }
     Ok(())
 }
@@ -591,6 +638,7 @@ fn retry(paths: &Paths, config: &Config, needle: &str) -> Result<()> {
     let card = card_or_die(&store, needle)?;
     store.clear_binding(&card.id)?;
     store.reset_rule_fires(&card.id)?;
+    store.reset_attempts(&card.id)?;
     store.set_error(&card.id, None)?;
     store.set_lane(&card.id, Column::Ready)?;
     println!("{} queued for another attempt", card.title);
@@ -1048,7 +1096,7 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
 
     println!("\nherdr integration");
     match crate::integrate::config_path().and_then(|p| {
-        let body = std::fs::read_to_string(&p)?;
+        let body = crate::integrate::read_config(&p)?;
         Ok((p, crate::integrate::inspect(&body)))
     }) {
         Ok((path, status)) => {
@@ -1056,6 +1104,7 @@ fn doctor(paths: &Paths, config: &Config) -> Result<()> {
             println!("  agent sidebar row   {}", yes_no(status.agents_row));
             println!("  spaces sidebar row  {}", yes_no(status.spaces_row));
             println!("  leader keybindings  {}", yes_no(status.keys));
+            println!("  cli on PATH         {}", yes_no(status.cli_on_path));
             if !status.complete() {
                 println!("  run `herdr-code-board configure --apply` to wire it in");
             }

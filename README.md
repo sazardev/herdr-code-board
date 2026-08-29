@@ -34,7 +34,12 @@ that herdr recognizes.
 
 ```sh
 herdr plugin install sazardev/herdr-code-board
+herdr-code-board configure --apply   # via: herdr plugin action invoke herdr-code-board.configure
 ```
+
+`configure --apply` is what makes it usable: it puts the CLI on your `PATH`,
+adds the sidebar rows and binds the leader keys. Until you run it, the binary
+only exists inside herdr's plugin directory.
 
 Or, to hack on it locally:
 
@@ -387,6 +392,10 @@ daemon           run the timer daemon in the foreground
   the event. With a single session — the normal case — that is invisible. If you
   run several named sessions at once, which one picks up a queued card is not
   determined.
+- **A card can only be dispatched `max_dispatches` times (25 by default).** Rules
+  can form a cycle — A queues B, B queues A — and every pass is a real agent
+  burning real quota. When a card hits the ceiling it stops in `failed` and says
+  so; `retry` clears the count.
 - **Metadata writes can repaint a pane.** The board publishes tokens only when a
   value actually changed, and never reads pane scrollback. If you see panes
   scrolling, `sidebar = false` in `config.toml` turns publishing off.

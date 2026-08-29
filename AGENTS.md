@@ -81,6 +81,17 @@ log. `tests/engine_lifecycle.rs` runs the full lifecycle against it.
 - **Auto-answer needs two switches.** `config.allow_auto_answer` *and*
   `card.auto_answer`. Do not collapse them, and do not add a third way in.
 
+## The dispatch budget exists for a reason
+
+Rules can form a cycle. A queues B on done, B queues A on done, and the engine
+happily runs that forever — each pass a real agent in a real pane. Nothing in
+the reducer, the fire budget or the concurrency cap stops it: `max_fires`
+defaults to unlimited, and re-enqueueing resets it.
+
+`Executor::over_budget` is the backstop, checked both when a rule enqueues and
+again in `dispatch`. Do not remove it, and do not make `retry` implicit — the
+only thing that clears `attempts` is a human asking for another run.
+
 ## Bugs the fake could not have caught
 
 Three defects survived 140 passing tests and only showed up the first time this

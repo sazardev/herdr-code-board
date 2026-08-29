@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+An audit of the published plugin, installed from GitHub the way anyone would.
+Five findings, one of them serious.
+
+- **A cycle of rules dispatched real agents forever.** A queues B, B queues A —
+  nothing stopped it, and each pass was an agent in a pane burning quota. There
+  is now a hard `max_dispatches` ceiling per card (25 by default): the card
+  stops in `failed` saying so, and `retry` clears the count deliberately. A
+  self-link had the same shape. Both are pinned by `tests/safety.rs`.
+- **`herdr plugin install` left nothing you could type.** The binary lives inside
+  herdr's managed checkout and nothing was on `PATH`. `configure --apply` now
+  links it into `~/.local/bin`, refuses to clobber a file that is not ours, and
+  `--uninstall` removes it. `doctor` reports it.
+- **`add --start` printed `[ready]` and went quiet when the dispatch failed.**
+  It now says what became of the card, with the error.
+- **The TUI re-read every card from SQLite on every keystroke**, including plain
+  navigation. It reloads only after something that can change data.
+- **`configure` failed outright when herdr had no `config.toml` yet.** A missing
+  file now reads as empty, and gets created.
+
+Also: `tests/tui_render.rs` draws every mode at a dozen terminal sizes from 1x1
+up, because a panic in the TUI kills the user's pane. It found nothing, which is
+the point of having it.
+
 ## 0.4.0
 
 The board lives inside herdr now, not beside it.

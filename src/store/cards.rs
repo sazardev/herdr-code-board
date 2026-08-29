@@ -394,6 +394,16 @@ impl Store {
         Ok(true)
     }
 
+    /// Clear the dispatch count, so a card stopped by the budget can run again.
+    /// Deliberate: only an explicit retry does this.
+    pub fn reset_attempts(&self, card_id: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE cards SET attempts = 0, updated_at = ?2 WHERE id = ?1",
+            params![card_id, now()],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_card(&self, id: &str) -> Result<bool> {
         let n = self
             .conn()

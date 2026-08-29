@@ -81,6 +81,20 @@ log. `tests/engine_lifecycle.rs` runs the full lifecycle against it.
 - **Auto-answer needs two switches.** `config.allow_auto_answer` *and*
   `card.auto_answer`. Do not collapse them, and do not add a third way in.
 
+## Two ordering and lifecycle traps
+
+**Never order cards by `id`.** A ULID sorts by time across milliseconds only;
+two generated inside the same one are ordered by their random tail. `created_at`
+is whole seconds, so it ties constantly. Order by `rowid`, which is insertion
+order. This produced a dispatch order that differed between machines and took
+two CI failures to pin down.
+
+**A plugin upgrade does not restart herdr.** The startup hook does not fire, so
+the daemon from the previous build keeps the lock and keeps running the code you
+just replaced. `daemon::WANTED_EXE` in the kv table is how the incumbent learns
+it has been superseded; it hands the lock over and spawns the new binary. Any
+change to the daemon's behaviour depends on that path working.
+
 ## The dispatch budget exists for a reason
 
 Rules can form a cycle. A queues B on done, B queues A on done, and the engine

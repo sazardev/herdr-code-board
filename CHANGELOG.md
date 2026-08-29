@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1
+
+- **Upgrading the plugin left the previous daemon running.** Installing a new
+  version does not restart herdr, so the startup hook never fires and the old
+  process keeps the singleton lock — running the code you just replaced. After
+  the 0.5.0 upgrade that meant a daemon with no dispatch ceiling. The board now
+  records which binary should hold the job, and an incumbent that sees a newer
+  one hands the lock over and starts it.
+- Card ordering is by `rowid`, not by ULID. A ULID sorts by time only across
+  milliseconds; two made inside the same one are ordered by their random tail,
+  so dispatch order differed between machines. CI caught this twice.
+
 ## 0.5.0
 
 An audit of the published plugin, installed from GitHub the way anyone would.

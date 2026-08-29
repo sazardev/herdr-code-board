@@ -1,6 +1,6 @@
 id = "herdr-code-board"
 name = "Herdr Code Board"
-version = "0.5.0"
+version = "0.5.1"
 min_herdr_version = "0.8.0"
 description = "Kanban queue for agentic prompts: cards dispatch real agents into herdr panes, worktrees and workspaces, and rules chain one card to the next."
 # Windows is excluded because pane commands go through herdr's native Windows

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+Two reasons the board was invisible.
+
+- **`prefix+b` is herdr's own sidebar toggle, and the installer bound the board
+  on top of it.** So the one key you were told to press took the sidebar away
+  instead of opening anything. The board is now `prefix+shift+b` and quick
+  capture is `prefix+a`, and `configure` refuses to bind over any of herdr's
+  default keys or any key already in your config, reporting what it declined.
+- **A repo whose cards were all in the backlog published nothing**, so the
+  Spaces sidebar was blank exactly when there was work to look at. A workspace
+  now shows `· 3` for captured work, `◷ 3` once queued and `▶ 2 · ◷ 1` once
+  running. Undispatched cards are matched to a workspace through its panes'
+  working directories, and only when the running cards do not already say.
+
 ## 0.6.1
 
 - **A schema-changing upgrade left the board with no timer daemon.** The 0.6.0

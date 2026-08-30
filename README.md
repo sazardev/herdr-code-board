@@ -132,9 +132,10 @@ Run this once and the board stops being a separate app:
 herdr-code-board configure --apply
 ```
 
-**Leader keys.** `prefix+b` opens the board, `prefix+shift+b` opens a popup that
-takes one line and queues it, `prefix+alt+b` re-imports overlays. They are
-ordinary `[[keys.command]]` bindings, so they show up in herdr's own key help.
+**Leader keys.** `prefix+shift+b` opens the board and `prefix+a` opens a popup
+that takes one line and queues it. Ordinary `[[keys.command]]` bindings, so they
+show up in herdr's own key help. `configure` never binds over one of herdr's own
+keys or one you already use — it tells you which it skipped instead.
 
 **The Agent sidebar.** Every pane a card owns gets the card's name, what it will
 start when it finishes, and its attempt count — beside the agent, where you are
@@ -145,7 +146,8 @@ already looking:
   ▶ Review the diff  → Run the tests
 ```
 
-**The Spaces sidebar.** Each workspace shows how much of the board is live in it:
+**The Spaces sidebar.** Each workspace shows what the board holds for it —
+`· 3` captured, `◷ 3` queued, `▶ 2 · ◷ 1` running:
 
 ```text
 ▣ rustock   main
@@ -400,6 +402,14 @@ If that session is stopped, the card waits and says so rather than starting
 somewhere you were not looking; it goes as soon as the session is back. A card
 queued from outside herdr belongs to no session and any session may take it,
 which is what a single-session board looks like from top to bottom.
+
+### What this cannot be
+
+Herdr's sidebar has exactly two sections, Spaces and Agents, and plugin v1 has
+no way to add a third — the docs are explicit that native non-terminal plugin UI
+is out of scope. So the board is not a panel beside them; it is a pane you open
+with `prefix+shift+b`, and what it publishes into those two sections is the
+summary you see without opening it.
 
 ## Known limitations
 

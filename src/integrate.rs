@@ -26,11 +26,104 @@ const SPACE_ROW: &str = r#"[{ token = "$board_space", dim = true }]"#;
 const AGENT_DEFAULT: &str = r#"[["state_icon", "workspace", "tab"], ["agent"]]"#;
 const SPACE_DEFAULT: &str = r#"[["state_icon", "workspace"], ["branch", "git_status"]]"#;
 
-const KEYS: &[(&str, &str, &str)] = &[
-    ("prefix+b", "open", "code board"),
-    ("prefix+shift+b", "quick", "queue a prompt"),
-    ("prefix+alt+b", "sync", "re-import board cards"),
+/// Keys herdr binds itself, out of `herdr --default-config`. Taking one of
+/// these silently replaces a built-in — `prefix+b` is the sidebar toggle, and
+/// binding over it is exactly how you end up unable to see anything.
+const HERDR_DEFAULT_KEYS: &[&str] = &[
+    "prefix+1",
+    "prefix+2",
+    "prefix+3",
+    "prefix+4",
+    "prefix+5",
+    "prefix+6",
+    "prefix+7",
+    "prefix+8",
+    "prefix+9",
+    "prefix+?",
+    "prefix+[",
+    "prefix+b",
+    "prefix+c",
+    "prefix+e",
+    "prefix+g",
+    "prefix+h",
+    "prefix+j",
+    "prefix+k",
+    "prefix+l",
+    "prefix+minus",
+    "prefix+n",
+    "prefix+o",
+    "prefix+p",
+    "prefix+q",
+    "prefix+r",
+    "prefix+s",
+    "prefix+shift+d",
+    "prefix+shift+g",
+    "prefix+shift+h",
+    "prefix+shift+j",
+    "prefix+shift+k",
+    "prefix+shift+l",
+    "prefix+shift+n",
+    "prefix+shift+p",
+    "prefix+shift+r",
+    "prefix+shift+t",
+    "prefix+shift+tab",
+    "prefix+shift+w",
+    "prefix+shift+x",
+    "prefix+tab",
+    "prefix+v",
+    "prefix+w",
+    "prefix+x",
+    "prefix+z",
 ];
+
+/// What we would like to bind, in preference order. Each is checked against
+/// herdr's own bindings and the user's before it is written.
+const KEYS: &[(&str, &str, &str)] = &[
+    ("prefix+shift+b", "open", "code board"),
+    ("prefix+a", "quick", "queue a prompt"),
+];
+
+/// Keys already spoken for, either by herdr or by the user's own config.
+fn taken(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = HERDR_DEFAULT_KEYS.iter().map(|k| k.to_string()).collect();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("key") else {
+            continue;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        // Ours do not count as a conflict with ourselves.
+        if line.contains(MARKER) {
+            continue;
+        }
+        if let Some(key) = value.trim().trim_matches('"').split('"').next() {
+            out.push(key.trim().trim_matches('"').to_string());
+        }
+    }
+    out
+}
+
+/// The bindings we can safely add, and the ones we are declining to.
+pub fn key_plan(
+    body: &str,
+) -> (
+    Vec<(&'static str, &'static str, &'static str)>,
+    Vec<&'static str>,
+) {
+    let taken = taken(body);
+    let mut ours = Vec::new();
+    let mut skipped = Vec::new();
+    for (key, action, description) in KEYS {
+        if taken.iter().any(|t| t == key) {
+            skipped.push(*key);
+        } else {
+            ours.push((*key, *action, *description));
+        }
+    }
+    (ours, skipped)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Status {
@@ -328,9 +421,13 @@ fn ensure_keys(body: &str) -> String {
     if body.contains(&format!("\"{MARKER}.")) {
         return body.to_string();
     }
+    let (ours, _) = key_plan(body);
+    if ours.is_empty() {
+        return body.to_string();
+    }
     let mut out = body.trim_end().to_string();
     out.push_str(&format!("\n\n# {MARKER}\n"));
-    for (key, action, description) in KEYS {
+    for (key, action, description) in ours {
         out.push_str(&format!(
             "[[keys.command]]\nkey = \"{key}\"\ntype = \"plugin_action\"\ncommand = \"{MARKER}.{action}\"\ndescription = \"{description}\" # {MARKER}\n\n"
         ));
@@ -465,7 +562,7 @@ description = "refresh all agent quotas"
         let twice = apply(&once).unwrap();
         assert_eq!(once, twice);
         assert_eq!(once.matches("$board_card").count(), 1);
-        assert_eq!(once.matches("prefix+b\"").count(), 1);
+        assert_eq!(once.matches("prefix+shift+b\"").count(), 1);
     }
 
     #[test]
@@ -559,6 +656,47 @@ description = "refresh all agent quotas"
             assert!(out.contains(&format!("command = \"{MARKER}.{action}\"")));
         }
         assert!(out.contains("type = \"plugin_action\""));
+    }
+
+    /// `prefix+b` is herdr's sidebar toggle. An earlier version bound the board
+    /// on top of it, which took the sidebar away from the user entirely.
+    #[test]
+    fn we_never_bind_over_one_of_herdrs_own_keys() {
+        for (key, _, _) in KEYS {
+            assert!(
+                !HERDR_DEFAULT_KEYS.contains(key),
+                "{key} is one of herdr's own bindings"
+            );
+        }
+        let out = apply(REAL).unwrap();
+        assert!(
+            !out.contains("key = \"prefix+b\"\n"),
+            "took the sidebar toggle"
+        );
+    }
+
+    #[test]
+    fn a_key_the_user_already_bound_is_left_alone() {
+        let mine = format!(
+            "{REAL}\n[[keys.command]]\nkey = \"prefix+a\"\ntype = \"plugin_action\"\ncommand = \"someone-else.thing\"\n"
+        );
+        let (ours, skipped) = key_plan(&mine);
+        assert!(skipped.contains(&"prefix+a"), "should decline a taken key");
+        assert!(ours.iter().all(|(k, _, _)| *k != "prefix+a"));
+
+        let out = apply(&mine).unwrap();
+        out.parse::<toml::Table>().unwrap();
+        assert_eq!(out.matches("someone-else.thing").count(), 1);
+        assert!(!out.contains(&format!(
+            "key = \"prefix+a\"\ntype = \"plugin_action\"\ncommand = \"{MARKER}"
+        )));
+    }
+
+    #[test]
+    fn every_key_we_want_is_free_in_a_stock_config() {
+        let (ours, skipped) = key_plan("");
+        assert!(skipped.is_empty(), "declined {skipped:?} on a stock config");
+        assert_eq!(ours.len(), KEYS.len());
     }
 
     #[test]

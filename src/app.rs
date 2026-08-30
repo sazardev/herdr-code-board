@@ -224,6 +224,15 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
         println!("  agent sidebar row   {}", yes_no(status.agents_row));
         println!("  spaces sidebar row  {}", yes_no(status.spaces_row));
         println!("  leader keybindings  {}", yes_no(status.keys));
+        let (bound, skipped) = crate::integrate::key_plan(&body);
+        if !status.keys {
+            for (key, _, description) in bound {
+                println!("  would bind {key:<16}{description}");
+            }
+            for key in skipped {
+                println!("  {key:<26}already bound — will leave it alone");
+            }
+        }
         println!(
             "  cli on PATH         {} ({})",
             yes_no(status.cli_on_path),
@@ -267,9 +276,13 @@ fn configure(args: crate::cli::ConfigureArgs) -> Result<()> {
     }
     crate::integrate::write(&path, &out)?;
     println!("wired the board into {}", path.display());
-    println!("  prefix+b        open the board");
-    println!("  prefix+shift+b  queue a prompt");
-    println!("  prefix+alt+b    re-import board cards");
+    let (bound, skipped) = crate::integrate::key_plan(&body);
+    for (key, _, description) in bound {
+        println!("  {key:<16}{description}");
+    }
+    for key in skipped {
+        println!("  {key:<16}already bound — left alone");
+    }
     reload_herdr();
     Ok(())
 }

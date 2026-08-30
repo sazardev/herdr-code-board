@@ -75,10 +75,15 @@ pub fn pane_tokens(card: &Card, rules: &[Rule], next: &[String], queued: usize) 
     out
 }
 
-/// The token a workspace publishes: how much of the board is live in it.
-pub fn workspace_token(running: usize, queued: usize) -> String {
+/// The token a workspace publishes: what the board holds for it.
+///
+/// Running and queued first, because those are happening. Failing that, the
+/// backlog — a repo with work captured for it should say so, or the Spaces
+/// sidebar is blank exactly when you have most reason to look at it.
+pub fn workspace_token(running: usize, queued: usize, waiting: usize) -> String {
     match (running, queued) {
-        (0, 0) => String::new(),
+        (0, 0) if waiting == 0 => String::new(),
+        (0, 0) => format!("· {waiting}"),
         (r, 0) => format!("▶ {r}"),
         (0, q) => format!("◷ {q}"),
         (r, q) => format!("▶ {r} · ◷ {q}"),
@@ -122,33 +127,63 @@ impl Publisher {
         let mut spaces: BTreeMap<String, Tokens> = BTreeMap::new();
         let mut running: BTreeMap<String, usize> = BTreeMap::new();
         let mut pending: BTreeMap<String, usize> = BTreeMap::new();
+        let mut waiting: BTreeMap<String, usize> = BTreeMap::new();
         for card in cards.iter().filter(|c| c.column.is_live()) {
             if let Some(ws) = &card.binding.workspace_id {
                 *running.entry(ws.clone()).or_default() += 1;
             }
         }
-        // Queued cards have no workspace yet, so attribute them to whichever
-        // workspace their repo's live cards are already using.
-        for card in cards.iter().filter(|c| c.column == Column::Ready) {
-            let Some(repo) = &card.repo_id else { continue };
-            let ws = cards.iter().find(|c| {
-                c.column.is_live()
-                    && c.repo_id.as_ref() == Some(repo)
-                    && c.binding.workspace_id.is_some()
-            });
-            if let Some(ws) = ws.and_then(|c| c.binding.workspace_id.clone()) {
-                *pending.entry(ws).or_default() += 1;
+
+        // A card that has not been dispatched owns no workspace, so its repo has
+        // to be located. Only worth asking herdr when there is something to place.
+        let undispatched: Vec<&Card> = cards
+            .iter()
+            .filter(|c| matches!(c.column, Column::Ready | Column::Backlog))
+            .filter(|c| c.repo_id.is_some())
+            .collect();
+        if !undispatched.is_empty() {
+            // A repo whose card is already running tells us its workspace for
+            // free. Only ask herdr about the repos that leaves unaccounted for.
+            let mut by_repo: BTreeMap<String, String> = BTreeMap::new();
+            for card in cards.iter().filter(|c| c.column.is_live()) {
+                if let (Some(repo), Some(ws)) = (&card.repo_id, &card.binding.workspace_id) {
+                    by_repo.insert(repo.clone(), ws.clone());
+                }
+            }
+            if undispatched.iter().any(|c| {
+                c.repo_id
+                    .as_ref()
+                    .map(|r| !by_repo.contains_key(r))
+                    .unwrap_or(false)
+            }) {
+                for (repo, ws) in repo_workspaces(store, herdr)? {
+                    by_repo.entry(repo).or_insert(ws);
+                }
+            }
+            for card in undispatched {
+                let Some(ws) = card.repo_id.as_ref().and_then(|r| by_repo.get(r)) else {
+                    continue;
+                };
+                let bucket = if card.column == Column::Ready {
+                    &mut pending
+                } else {
+                    &mut waiting
+                };
+                *bucket.entry(ws.clone()).or_default() += 1;
             }
         }
-        for ws in running
+
+        let touched: BTreeSet<String> = running
             .keys()
             .chain(pending.keys())
+            .chain(waiting.keys())
             .cloned()
-            .collect::<BTreeSet<_>>()
-        {
+            .collect();
+        for ws in touched {
             let value = workspace_token(
                 running.get(&ws).copied().unwrap_or(0),
                 pending.get(&ws).copied().unwrap_or(0),
+                waiting.get(&ws).copied().unwrap_or(0),
             );
             spaces.insert(ws, vec![("board_space".into(), value)]);
         }
@@ -159,6 +194,31 @@ impl Publisher {
 
         Ok(writes)
     }
+}
+
+/// Map each tracked repo to the herdr workspace showing it, if one is open.
+///
+/// Workspace records carry no cwd, so this goes through the panes inside them —
+/// the same rule [`crate::engine::placement`] uses to decide where a card lands.
+fn repo_workspaces(store: &Store, herdr: &dyn HerdrApi) -> Result<BTreeMap<String, String>> {
+    let repos = store.list_repos()?;
+    if repos.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let panes = herdr.panes(None).unwrap_or_default();
+    let mut out = BTreeMap::new();
+    for repo in repos {
+        let root = repo.path.trim_end_matches('/').to_string();
+        let found = panes.iter().find(|p| {
+            p.effective_cwd()
+                .map(|c| c == root || c.starts_with(&format!("{root}/")))
+                .unwrap_or(false)
+        });
+        if let Some(ws) = found.and_then(|p| p.workspace_id.clone()) {
+            out.insert(repo.id, ws);
+        }
+    }
+    Ok(out)
 }
 
 /// Titles of the cards a set of `on done` rules would queue.
@@ -437,6 +497,41 @@ mod tests {
         assert!(!fresh.iter().any(|c| c.contains("w1:p3")));
     }
 
+    /// A repo whose cards are all still in the backlog used to publish nothing,
+    /// which made the Spaces sidebar blank exactly when there was work to see.
+    #[test]
+    fn a_backlog_shows_up_against_its_repos_workspace() {
+        let (store, repo) = board();
+        for title in ["one", "two", "three"] {
+            store
+                .create_card(&NewCard {
+                    repo_id: Some(repo.id.clone()),
+                    ..NewCard::new(title, "claude")
+                })
+                .unwrap();
+        }
+        let h = FakeHerdr::new().with_workspace("w1", "erp", "/repo/erp");
+
+        Publisher::publish(&store, &h).unwrap();
+
+        let call = &h.calls_matching("workspace report-metadata")[0];
+        assert!(call.contains("board_space=· 3"), "got: {call}");
+    }
+
+    #[test]
+    fn a_repo_with_no_workspace_open_publishes_nothing_for_it() {
+        let (store, repo) = board();
+        store
+            .create_card(&NewCard {
+                repo_id: Some(repo.id.clone()),
+                ..NewCard::new("one", "claude")
+            })
+            .unwrap();
+        let h = FakeHerdr::new();
+        Publisher::publish(&store, &h).unwrap();
+        assert!(h.calls_matching("workspace report-metadata").is_empty());
+    }
+
     #[test]
     fn an_empty_board_publishes_nothing() {
         let store = Store::open_in_memory().unwrap();
@@ -447,10 +542,14 @@ mod tests {
 
     #[test]
     fn the_workspace_token_reads_naturally_at_every_count() {
-        assert_eq!(workspace_token(0, 0), "");
-        assert_eq!(workspace_token(2, 0), "▶ 2");
-        assert_eq!(workspace_token(0, 3), "◷ 3");
-        assert_eq!(workspace_token(2, 3), "▶ 2 · ◷ 3");
+        assert_eq!(workspace_token(0, 0, 0), "");
+        assert_eq!(workspace_token(2, 0, 0), "▶ 2");
+        assert_eq!(workspace_token(0, 3, 0), "◷ 3");
+        assert_eq!(workspace_token(2, 3, 0), "▶ 2 · ◷ 3");
+        // Nothing moving, but work captured for this repo: say so.
+        assert_eq!(workspace_token(0, 0, 4), "· 4");
+        // Once something is moving, the backlog stops competing for the space.
+        assert_eq!(workspace_token(1, 0, 4), "▶ 1");
     }
 
     #[test]

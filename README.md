@@ -184,6 +184,10 @@ wired; `configure --uninstall` takes back exactly what it added.
 By default a card completes when its agent's turn ends. Pass `--review` (or
 `review = true` in an overlay) to park it in `waiting` for a human instead.
 
+The board follows herdr's theme: it reads `[theme]` from herdr's config, base
+name and `theme.custom.*` overrides alike, and draws with the same palette
+tokens. Set `theme = "gruvbox"` in the plugin's own config to force one instead.
+
 ### Keys
 
 ```

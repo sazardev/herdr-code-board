@@ -1,5 +1,4 @@
 //! Draw every mode at hostile terminal sizes. A panic here kills the user's pane.
-use herdr_code_board::config::Config;
 use herdr_code_board::model::{Binding, Card, Column, Placement, Repo};
 use herdr_code_board::tui::form::Form;
 use herdr_code_board::tui::render;
@@ -65,7 +64,7 @@ fn app() -> App {
 }
 
 fn draw_at(a: &App, w: u16, h: u16) {
-    let theme = Theme::from_config(&Config::default().theme);
+    let theme = Theme::gruvbox();
     let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
     t.draw(|f| render::draw(f, a, &theme)).unwrap();
 }

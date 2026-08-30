@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.0
+
+The board looks like part of herdr now, instead of a guest inside it.
+
+- **It follows herdr's theme.** `[theme]` is read from herdr's own config —
+  the built-in name plus any `theme.custom.*` overrides — and the board uses the
+  same palette tokens herdr does (`accent`, `surface0`, `overlay1`, `subtext0`
+  and the colour names). Set herdr to gruvbox and the board is gruvbox. Ships
+  catppuccin, gruvbox, tokyonight and nord; anything else falls back to herdr's
+  default. `theme = "name"` in the plugin's config forces one.
+- **Flat, like the sidebar.** No boxed lanes: headings in the lane's colour with
+  a thin rule under them, cards as two-line rows, the selected one marked with a
+  background rather than inverted video, meta in dim subtext. The accent bar
+  `▌` marks the header and the active field, the way herdr marks what you are
+  looking at. Modals keep a rounded border, because herdr's popups have one.
+- **`?` lists the commands too**, not just the keys — the leader bindings and
+  the CLI, side by side, and stacked when the terminal is too narrow for two
+  columns rather than truncated.
+
+The old `[theme]` colour table older versions wrote still parses; it is ignored.
+
 ## 0.6.2
 
 Two reasons the board was invisible.

@@ -55,7 +55,11 @@ fn decode(ev: Event) -> Option<Key> {
 
 pub fn run(paths: &Paths, config: &Config, quick: bool) -> Result<()> {
     let herdr: Arc<dyn HerdrApi> = Arc::new(CliHerdr::new());
-    let theme = Theme::from_config(&config.theme);
+    // Follow herdr's own theme unless the board's config forces one.
+    let theme = match config.theme.forced() {
+        Some(name) => Theme::named(name),
+        None => Theme::from_herdr(),
+    };
 
     let mut app = App::new(
         agents::KINDS.iter().map(|s| s.to_string()).collect(),

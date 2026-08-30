@@ -170,7 +170,7 @@ pub struct Config {
     pub sidebar: bool,
     /// How the `--model` value is passed to each agent CLI.
     pub model_flags: BTreeMap<String, ModelFlag>,
-    pub theme: Theme,
+    pub theme: ThemeSetting,
 }
 
 /// How a given agent CLI accepts a model selection.
@@ -194,29 +194,31 @@ impl ModelFlag {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Theme {
-    pub accent: String,
-    pub running: String,
-    pub waiting: String,
-    pub blocked: String,
-    pub done: String,
-    pub failed: String,
-    pub muted: String,
+/// Which palette the board draws with.
+///
+/// Empty means "whatever herdr is set to", which is the point. A name here
+/// forces one instead. The untagged form also swallows the colour table older
+/// versions wrote, so upgrading does not break config parsing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ThemeSetting {
+    Name(String),
+    /// A `[theme]` table from before this was a name. Ignored.
+    Legacy(toml::Table),
 }
 
-impl Default for Theme {
-    /// Gruvbox dark, to match a common herdr terminal setup.
+impl Default for ThemeSetting {
     fn default() -> Self {
-        Self {
-            accent: "#83a598".into(),
-            running: "#b8bb26".into(),
-            waiting: "#fabd2f".into(),
-            blocked: "#fb4934".into(),
-            done: "#8ec07c".into(),
-            failed: "#cc241d".into(),
-            muted: "#928374".into(),
+        ThemeSetting::Name(String::new())
+    }
+}
+
+impl ThemeSetting {
+    /// The forced palette name, if one was set.
+    pub fn forced(&self) -> Option<&str> {
+        match self {
+            ThemeSetting::Name(n) if !n.trim().is_empty() => Some(n.trim()),
+            _ => None,
         }
     }
 }
@@ -236,7 +238,7 @@ impl Default for Config {
             notify_on: vec!["blocked".into(), "failed".into()],
             sidebar: true,
             model_flags: crate::agents::default_model_flags(),
-            theme: Theme::default(),
+            theme: ThemeSetting::default(),
         }
     }
 }
@@ -294,6 +296,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_theme_means_follow_herdr() {
+        assert_eq!(Config::default().theme.forced(), None);
+        assert_eq!(
+            ThemeSetting::Name("gruvbox".into()).forced(),
+            Some("gruvbox")
+        );
+        assert_eq!(ThemeSetting::Name("  ".into()).forced(), None);
+    }
+
+    /// Older versions wrote a table of hex colours here. Upgrading must not
+    /// break config parsing.
+    #[test]
+    fn the_colour_table_older_versions_wrote_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().to_path_buf(),
+            from_herdr: false,
+        };
+        std::fs::write(
+            paths.config_file(),
+            "[theme]\naccent = \"#83a598\"\nmuted = \"#928374\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&paths).expect("an old config must still load");
+        assert_eq!(cfg.theme.forced(), None, "and is treated as follow-herdr");
+    }
 
     #[test]
     fn only_the_lanes_that_need_a_human_notify_by_default() {
